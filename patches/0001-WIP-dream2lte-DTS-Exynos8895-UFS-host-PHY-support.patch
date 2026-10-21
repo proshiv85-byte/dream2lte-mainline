@@ -1,0 +1,838 @@
+From 49bc614f85325db9b9368401149bb39e1f0bd14a Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Wed, 21 Oct 2026 20:03:54 +0300
+Subject: [PATCH 1/5] WIP: dream2lte DTS, Exynos8895 UFS host + PHY support
+
+Work in progress, to be split into proper patches.
+
+Assisted-by: Claude Opus 5.5 (Anthropic) - generated the code from the
+Samsung vendor kernel's exynos8895 UFS driver/DT, tested on SM-G955F.
+---
+ .../bindings/arm/samsung/samsung-boards.yaml  |   1 +
+ arch/arm64/boot/dts/exynos/Makefile           |   1 +
+ .../boot/dts/exynos/exynos8895-dream2lte.dts  | 230 ++++++++++++++++
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    |  32 +++
+ drivers/phy/samsung/Makefile                  |   1 +
+ drivers/phy/samsung/phy-exynos8895-ufs.c      | 104 +++++++
+ drivers/phy/samsung/phy-samsung-ufs.c         |   3 +
+ drivers/phy/samsung/phy-samsung-ufs.h         |   1 +
+ drivers/ufs/core/ufshcd.c                     |   5 +-
+ drivers/ufs/host/ufs-exynos.c                 | 258 +++++++++++++++++-
+ drivers/ufs/host/ufs-exynos.h                 |   1 +
+ include/ufs/ufshcd.h                          |   4 +
+ 12 files changed, 638 insertions(+), 3 deletions(-)
+ create mode 100644 arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+ create mode 100644 drivers/phy/samsung/phy-exynos8895-ufs.c
+
+diff --git a/Documentation/devicetree/bindings/arm/samsung/samsung-boards.yaml b/Documentation/devicetree/bindings/arm/samsung/samsung-boards.yaml
+index 273464400..9ce195e52 100644
+--- a/Documentation/devicetree/bindings/arm/samsung/samsung-boards.yaml
++++ b/Documentation/devicetree/bindings/arm/samsung/samsung-boards.yaml
+@@ -244,6 +244,7 @@ properties:
+       - description: Exynos8895 based boards
+         items:
+           - enum:
++              - samsung,dream2lte               # Samsung Galaxy S8+ (SM-G955F)
+               - samsung,dreamlte                # Samsung Galaxy S8 (SM-G950F)
+           - const: samsung,exynos8895
+ 
+diff --git a/arch/arm64/boot/dts/exynos/Makefile b/arch/arm64/boot/dts/exynos/Makefile
+index 8c48ce2e0..90d5cd856 100644
+--- a/arch/arm64/boot/dts/exynos/Makefile
++++ b/arch/arm64/boot/dts/exynos/Makefile
+@@ -15,6 +15,7 @@ dtb-$(CONFIG_ARCH_EXYNOS) += \
+ 	exynos7885-jackpotlte.dtb	\
+ 	exynos850-e850-96.dtb		\
+ 	exynos8855-smdk.dtb		\
++	exynos8895-dream2lte.dtb		\
+ 	exynos8895-dreamlte.dtb		\
+ 	exynos9810-starlte.dtb		\
+ 	exynos990-c1s.dtb		\
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+new file mode 100644
+index 000000000..55112c2c1
+--- /dev/null
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -0,0 +1,230 @@
++// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
++/*
++ * Samsung Galaxy S8+ (dream2lte/SM-G955F) device tree source
++ *
++ * Based on exynos8895-dreamlte.dts,
++ * Copyright (c) 2024, Ivaylo Ivanov <ivo.ivanov.ivanov1@gmail.com>
++ */
++
++/dts-v1/;
++#include "exynos8895.dtsi"
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/soc/samsung,exynos-usi.h>
++
++/ {
++	model = "Samsung Galaxy S8+ (SM-G955F)";
++	compatible = "samsung,dream2lte", "samsung,exynos8895";
++	chassis-type = "handset";
++
++	aliases {
++		mmc0 = &mmc;
++	};
++
++	chosen {
++		#address-cells = <2>;
++		#size-cells = <1>;
++		ranges;
++
++		framebuffer: framebuffer@cc000000 {
++			compatible = "simple-framebuffer";
++			reg = <0 0xcc000000 (1440 * 2960 * 4)>;
++			width = <1440>;
++			height = <2960>;
++			stride = <(1440 * 4)>;
++			format = "a8r8g8b8";
++		};
++	};
++
++	memory@80000000 {
++		device_type = "memory";
++		reg = <0x0 0x80000000 0x3c800000>,
++		      <0x0 0xc0000000 0x40000000>,
++		      <0x8 0x80000000 0x80000000>;
++	};
++
++	reserved-memory {
++		#address-cells = <2>;
++		#size-cells = <1>;
++		ranges;
++
++		/*
++		 * Same location and layout as the "log_pstore" item of the
++		 * vendor kernel's exynos-snapshot, so the console log can be
++		 * read back from the vendor kernel (and TWRP) as pmsg-ramoops-0.
++		 */
++		ramoops@92000000 {
++			compatible = "ramoops";
++			reg = <0 0x92000000 0x8000>;
++			record-size = <0x4000>;
++			console-size = <0x4000>;
++		};
++
++		tima@b1000000 {
++			reg = <0 0xb1000000 0x200000>;
++			no-map;
++		};
++
++		seclog@c0000000 {
++			reg = <0 0xc0000000 0x10000>;
++			no-map;
++		};
++
++		cont_splash_mem: framebuffer@cc000000 {
++			reg = <0 0xcc000000 (1440 * 2960 * 4)>;
++			no-map;
++		};
++
++		/*
++		 * Carve-outs of the vendor firmware, some of them are protected
++		 * by the secure world. Any access from Linux faults.
++		 */
++		secure_camera@d0000000 {
++			reg = <0 0xd0000000 0x1400000>;
++			no-map;
++		};
++
++		video_stream@e3c00000 {
++			reg = <0 0xe3c00000 0x3800000>;
++			no-map;
++		};
++
++		tui@e7400000 {
++			reg = <0 0xe7400000 0x3400000>;
++			no-map;
++		};
++
++		abox@ea800000 {
++			reg = <0 0xea800000 0x400000>;
++			no-map;
++		};
++
++		crypto@f3400000 {
++			reg = <0 0xf3400000 0x1800000>;
++			no-map;
++		};
++
++		modem_if@f4c00000 {
++			reg = <0 0xf4c00000 0x9000000>;
++			no-map;
++		};
++
++		cp_ram_logging@fdc00000 {
++			reg = <0 0xfdc00000 0x2000000>;
++			no-map;
++		};
++
++		gnss_if@ffc00000 {
++			reg = <0 0xffc00000 0x400000>;
++			no-map;
++		};
++	};
++
++	ufs_vcc: regulator-ufs-vcc {
++		compatible = "regulator-fixed";
++		regulator-name = "ufs-vcc";
++		gpio = <&gpg0 0 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++		regulator-always-on;
++	};
++
++	gpio-keys {
++		compatible = "gpio-keys";
++
++		pinctrl-0 = <&key_power &key_voldown &key_volup &key_wink>;
++		pinctrl-names = "default";
++
++		power-key {
++			label = "Power";
++			linux,code = <KEY_POWER>;
++			gpios = <&gpa2 4 GPIO_ACTIVE_LOW>;
++			wakeup-source;
++		};
++
++		voldown-key {
++			label = "Volume Down";
++			linux,code = <KEY_VOLUMEDOWN>;
++			gpios = <&gpa0 4 GPIO_ACTIVE_LOW>;
++		};
++
++		volup-key {
++			label = "Volume Up";
++			linux,code = <KEY_VOLUMEUP>;
++			gpios = <&gpa0 3 GPIO_ACTIVE_LOW>;
++		};
++
++		/* Typically used for Bixby. Map it as a camera button for now */
++		wink-key {
++			label = "Camera";
++			linux,code = <KEY_CAMERA>;
++			gpios = <&gpa0 6 GPIO_ACTIVE_LOW>;
++			wakeup-source;
++		};
++	};
++};
++
++&oscclk {
++	clock-frequency = <26000000>;
++};
++
++&pinctrl_alive {
++	key_power: key-power-pins {
++		samsung,pins = "gpa2-4";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
++	};
++
++	key_voldown: key-voldown-pins {
++		samsung,pins = "gpa0-4";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
++	};
++
++	key_volup: key-volup-pins {
++		samsung,pins = "gpa0-3";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
++	};
++
++	key_wink: key-wink-pins {
++		samsung,pins = "gpa0-6";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
++	};
++};
++
++&ufs {
++	vcc-supply = <&ufs_vcc>;
++	vcc-fixed-regulator;
++
++	status = "okay";
++};
++
++&ufs_phy {
++	status = "okay";
++};
++
++&pmu_system_controller {
++	reboot: syscon-reboot {
++		compatible = "syscon-reboot";
++		offset = <0x400>; /* SWRESET */
++		mask = <0x1>;
++		value = <0x1>;
++	};
++
++	/* S-Boot reads the reboot reason from INFORM3 */
++	reboot-mode {
++		compatible = "syscon-reboot-mode";
++		offset = <0x80c>;
++		mode-normal = <0x12345670>;
++		mode-bootloader = <0x1234567d>;
++		mode-download = <0x12345671>;
++		mode-recovery = <0x12345674>;
++	};
++};
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index a9a6f6970..788b066f1 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -1451,6 +1451,38 @@ pinctrl_fsys0: pinctrl@11050000 {
+ 			interrupts = <GIC_SPI 335 IRQ_TYPE_LEVEL_HIGH>;
+ 		};
+ 
++		ufs: ufs@11120000 {
++			compatible = "samsung,exynos8895-ufs";
++			reg = <0x11120000 0x200>,
++			      <0x11121100 0x200>,
++			      <0x11110000 0x8000>,
++			      <0x11130000 0x100>;
++			reg-names = "hci", "vs_hci", "unipro", "ufsp";
++			interrupts = <GIC_SPI 334 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&cmu_fsys0 CLK_GOUT_FSYS0_UFS_EMBD_I_ACLK>,
++				 <&cmu_fsys0 CLK_GOUT_FSYS0_UFS_EMBD_I_CLK_UNIPRO>;
++			clock-names = "core_clk", "sclk_unipro_main";
++			freq-table-hz = <0 0>, <0 0>;
++			dma-coherent;
++			pinctrl-0 = <&ufs_rst_n &ufs_refclk_out>;
++			pinctrl-names = "default";
++			phys = <&ufs_phy>;
++			phy-names = "ufs-phy";
++			samsung,sysreg = <&syscon_fsys0 0x700>;
++
++			status = "disabled";
++		};
++
++		ufs_phy: phy@11124000 {
++			compatible = "samsung,exynos8895-ufs-phy";
++			reg = <0x11124000 0x800>;
++			reg-names = "phy-pma";
++			samsung,pmu-syscon = <&pmu_system_controller>;
++			#phy-cells = <0>;
++
++			status = "disabled";
++		};
++
+ 		cmu_fsys1: clock-controller@11400000 {
+ 			compatible = "samsung,exynos8895-cmu-fsys1";
+ 			reg = <0x11400000 0x8000>;
+diff --git a/drivers/phy/samsung/Makefile b/drivers/phy/samsung/Makefile
+index 342682638..4b017dbe7 100644
+--- a/drivers/phy/samsung/Makefile
++++ b/drivers/phy/samsung/Makefile
+@@ -6,6 +6,7 @@ obj-$(CONFIG_PHY_SAMSUNG_UFS)		+= phy-exynos-ufs.o
+ phy-exynos-ufs-y			+= phy-gs101-ufs.o
+ phy-exynos-ufs-y			+= phy-samsung-ufs.o
+ phy-exynos-ufs-y			+= phy-exynos7-ufs.o
++phy-exynos-ufs-y			+= phy-exynos8895-ufs.o
+ phy-exynos-ufs-y			+= phy-exynosautov9-ufs.o
+ phy-exynos-ufs-y			+= phy-exynosautov920-ufs.o
+ phy-exynos-ufs-y			+= phy-fsd-ufs.o
+diff --git a/drivers/phy/samsung/phy-exynos8895-ufs.c b/drivers/phy/samsung/phy-exynos8895-ufs.c
+new file mode 100644
+index 000000000..a56b323f1
+--- /dev/null
++++ b/drivers/phy/samsung/phy-exynos8895-ufs.c
+@@ -0,0 +1,104 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * UFS PHY driver data for Samsung Exynos8895 SoC
++ *
++ * Calibration values taken from the Samsung vendor kernel's device tree
++ * (exynos8895.dtsi: phy-init, calib-of-hs-rate-b, post-calib-of-hs-rate-b).
++ */
++
++#include <linux/delay.h>
++#include <linux/iopoll.h>
++
++#include "phy-samsung-ufs.h"
++
++#define EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL	0x724
++#define EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL_MASK	0x1
++#define EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL_EN	BIT(0)
++
++/* The lanes of the transceiver block are 0x50 registers apart */
++#define EXYNOS8895_PHY_TRSV_CH_OFFSET		0x50
++#define EXYNOS8895_PHY_CDR_LOCK_STATUS		0x7f
++#define EXYNOS8895_PHY_CDR_LOCK_BIT		BIT(0)
++
++#define PHY_EXYNOS8895_TRSV_REG_CFG(o, v, d) \
++	PHY_TRSV_REG_CFG_OFFSET(o, v, d, EXYNOS8895_PHY_TRSV_CH_OFFSET)
++
++/* Calibration for phy initialization */
++static const struct samsung_ufs_phy_cfg exynos8895_pre_init_cfg[] = {
++	PHY_COMN_REG_CFG(0x023, 0x80, PWR_MODE_ANY),
++	PHY_COMN_REG_CFG(0x01d, 0x10, PWR_MODE_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x044, 0xb5, PWR_MODE_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x04d, 0x43, PWR_MODE_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x05b, 0x20, PWR_MODE_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x05e, 0xc0, PWR_MODE_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x038, 0x12, PWR_MODE_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x059, 0x58, PWR_MODE_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x023, 0xc0, PWR_MODE_ANY),
++	PHY_COMN_REG_CFG(0x023, 0x00, PWR_MODE_ANY),
++	END_UFS_PHY_CFG
++};
++
++/* Calibration for HS mode series A/B, values for HS-G3 */
++static const struct samsung_ufs_phy_cfg exynos8895_pre_pwr_hs_cfg[] = {
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x032, 0xbc, PWR_MODE_HS_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x03c, 0x7f, PWR_MODE_HS_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x048, 0xc0, PWR_MODE_HS_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x04a, 0x00, PWR_MODE_HS_G3_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x04b, 0x00, PWR_MODE_HS_G3_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x04d, 0x63, PWR_MODE_HS_G3_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x042, 0x5d, PWR_MODE_HS_ANY),
++	PHY_EXYNOS8895_TRSV_REG_CFG(0x043, 0x90, PWR_MODE_HS_ANY),
++	END_UFS_PHY_CFG
++};
++
++/* Calibration for HS mode series A/B after PMC */
++static const struct samsung_ufs_phy_cfg exynos8895_post_pwr_hs_cfg[] = {
++	END_UFS_PHY_CFG
++};
++
++static const struct samsung_ufs_phy_cfg *exynos8895_ufs_phy_cfgs[CFG_TAG_MAX] = {
++	[CFG_PRE_INIT]		= exynos8895_pre_init_cfg,
++	[CFG_PRE_PWR_HS]	= exynos8895_pre_pwr_hs_cfg,
++	[CFG_POST_PWR_HS]	= exynos8895_post_pwr_hs_cfg,
++};
++
++static int exynos8895_ufs_phy_wait_for_cal(struct phy *phy, u8 lane)
++{
++	/* The PMA needs 200us to settle after the initial calibration */
++	if (lane == 0)
++		udelay(200);
++
++	return 0;
++}
++
++static int exynos8895_ufs_phy_wait_cdr_lock(struct phy *phy, u8 lane)
++{
++	struct samsung_ufs_phy *ufs_phy = get_samsung_ufs_phy(phy);
++	u32 val;
++	int err;
++
++	/* Like the vendor kernel, only lane 0 is checked */
++	if (lane != 0)
++		return 0;
++
++	err = readl_poll_timeout(ufs_phy->reg_pma +
++				 PHY_APB_ADDR(EXYNOS8895_PHY_CDR_LOCK_STATUS),
++				 val, (val & EXYNOS8895_PHY_CDR_LOCK_BIT),
++				 10, 100000);
++	if (err)
++		dev_err(ufs_phy->dev,
++			"failed to get phy cdr lock acquisition %d\n", err);
++
++	return err;
++}
++
++const struct samsung_ufs_phy_drvdata exynos8895_ufs_phy = {
++	.cfgs = exynos8895_ufs_phy_cfgs,
++	.isol = {
++		.offset = EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL,
++		.mask = EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL_MASK,
++		.en = EXYNOS8895_EMBEDDED_COMBO_PHY_CTRL_EN,
++	},
++	.wait_for_cal = exynos8895_ufs_phy_wait_for_cal,
++	.wait_for_cdr = exynos8895_ufs_phy_wait_cdr_lock,
++};
+diff --git a/drivers/phy/samsung/phy-samsung-ufs.c b/drivers/phy/samsung/phy-samsung-ufs.c
+index ee665f26c..bda597014 100644
+--- a/drivers/phy/samsung/phy-samsung-ufs.c
++++ b/drivers/phy/samsung/phy-samsung-ufs.c
+@@ -360,6 +360,9 @@ static const struct of_device_id samsung_ufs_phy_match[] = {
+ 	}, {
+ 		.compatible = "samsung,exynos7-ufs-phy",
+ 		.data = &exynos7_ufs_phy,
++	}, {
++		.compatible = "samsung,exynos8895-ufs-phy",
++		.data = &exynos8895_ufs_phy,
+ 	}, {
+ 		.compatible = "samsung,exynosautov9-ufs-phy",
+ 		.data = &exynosautov9_ufs_phy,
+diff --git a/drivers/phy/samsung/phy-samsung-ufs.h b/drivers/phy/samsung/phy-samsung-ufs.h
+index f2c2e744e..89465f5b4 100644
+--- a/drivers/phy/samsung/phy-samsung-ufs.h
++++ b/drivers/phy/samsung/phy-samsung-ufs.h
+@@ -155,6 +155,7 @@ void samsung_ufs_phy_config(struct samsung_ufs_phy *phy,
+ 			    const struct samsung_ufs_phy_cfg *cfg, u8 lane);
+ 
+ extern const struct samsung_ufs_phy_drvdata exynos7_ufs_phy;
++extern const struct samsung_ufs_phy_drvdata exynos8895_ufs_phy;
+ extern const struct samsung_ufs_phy_drvdata exynosautov9_ufs_phy;
+ extern const struct samsung_ufs_phy_drvdata exynosautov920_ufs_phy;
+ extern const struct samsung_ufs_phy_drvdata fsd_ufs_phy;
+diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
+index ca8329052..fee5c1a2a 100644
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -4533,7 +4533,10 @@ static int ufshcd_uic_pwr_ctrl(struct ufs_hba *hba, struct uic_command *cmd)
+ 	}
+ 
+ check_upmcrs:
+-	status = ufshcd_get_upmcrs(hba);
++	if (hba->vops && hba->vops->get_upmcrs)
++		status = hba->vops->get_upmcrs(hba, cmd);
++	else
++		status = ufshcd_get_upmcrs(hba);
+ 	if (status != PWR_LOCAL) {
+ 		dev_err(hba->dev,
+ 			"pwr ctrl cmd 0x%x with (MIBattribute 0x%x, mode 0x%x) failed, host upmcrs:0x%x\n",
+diff --git a/drivers/ufs/host/ufs-exynos.c b/drivers/ufs/host/ufs-exynos.c
+index b2f65c465..4d4730686 100644
+--- a/drivers/ufs/host/ufs-exynos.c
++++ b/drivers/ufs/host/ufs-exynos.c
+@@ -105,6 +105,10 @@
+ #define UFS_GS101_RD_SHARABLE		BIT(0)
+ #define UFS_GS101_SHARABLE		(UFS_GS101_WR_SHARABLE | \
+ 					 UFS_GS101_RD_SHARABLE)
++#define UFS_EXYNOS8895_WR_SHARABLE	BIT(9)
++#define UFS_EXYNOS8895_RD_SHARABLE	BIT(8)
++#define UFS_EXYNOS8895_SHARABLE		(UFS_EXYNOS8895_WR_SHARABLE | \
++					 UFS_EXYNOS8895_RD_SHARABLE)
+ #define UFS_SHAREABILITY_OFFSET		0x710
+ 
+ /* Multi-host registers */
+@@ -927,7 +931,9 @@ static int exynos_ufs_pre_pwr_mode(struct ufs_hba *hba,
+ 		ufs->drv_data->pre_pwr_change(ufs, dev_req_params);
+ 
+ 	if (ufshcd_is_hs_mode(dev_req_params)) {
+-		exynos_ufs_config_sync_pattern_mask(ufs, dev_req_params);
++		if (!(ufs->opts & EXYNOS_UFS_OPT_SKIP_SYNC_PATTERN_MASK))
++			exynos_ufs_config_sync_pattern_mask(ufs,
++							    dev_req_params);
+ 
+ 		switch (dev_req_params->hs_rate) {
+ 		case PA_HS_MODE_A:
+@@ -1120,7 +1126,8 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
+ 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
+ 			exynos_ufs_disable_auto_ctrl_hcc(ufs);
+ 		exynos_ufs_ungate_clks(ufs);
+-	} else if (!on && status == POST_CHANGE) {
++	} else if (!on && status == PRE_CHANGE) {
++		/* HCI registers are not accessible once the clocks are off */
+ 		exynos_ufs_gate_clks(ufs);
+ 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
+ 			exynos_ufs_enable_auto_ctrl_hcc(ufs);
+@@ -2005,6 +2012,206 @@ static int fsd_ufs_suspend(struct exynos_ufs *ufs)
+ 	return 0;
+ }
+ 
++#define EXYNOS8895_SMC_CMD_FMP_SECURITY	\
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_64, \
++			   ARM_SMCCC_OWNER_SIP, 0x1810)
++#define EXYNOS8895_SMC_CMD_SMU		\
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_64, \
++			   ARM_SMCCC_OWNER_SIP, 0x1830)
++#define EXYNOS8895_SMU_EMBEDDED		0
++#define EXYNOS8895_SMU_INIT		0
++#define EXYNOS8895_FMP_DESCTYPE_0	0
++/* Override of the PHY PCS attributes; the PA_DBG_OV_TM of this SoC */
++#define EXYNOS8895_PCS_OV_TM		0x200
++#define EXYNOS8895_RX_MIN_ACTV_TIME_CAP	0x3
++#define EXYNOS8895_UFS_TCXO_SEL		0x1150
++#define EXYNOS8895_PMU_UFS_OPTION	0x620
++#define HCI_UFS_ACG_DISABLE		0xFC
++#define HCI_UFS_ACG_DISABLE_EN		BIT(0)
++#define HCI_MPHY_REFCLK_SEL		0x108
++#define MPHY_REFCLK_SEL			BIT(0)
++
++static int exynos8895_ufs_drv_init(struct exynos_ufs *ufs)
++{
++	struct ufs_hba *hba = ufs->hba;
++	struct arm_smccc_res res;
++	struct regmap *pmu;
++	u32 reg;
++
++	/*
++	 * The UFS protector is configured by the secure world: use plain
++	 * PRDT entries (descriptor type 0) and let it initialize the SMU.
++	 */
++	arm_smccc_smc(EXYNOS8895_SMC_CMD_FMP_SECURITY, 0,
++		      EXYNOS8895_SMU_EMBEDDED, EXYNOS8895_FMP_DESCTYPE_0,
++		      0, 0, 0, 0, &res);
++	if (res.a0)
++		dev_warn(hba->dev, "SMC_CMD_FMP_SECURITY failed: %ld\n", res.a0);
++
++	arm_smccc_smc(EXYNOS8895_SMC_CMD_SMU, EXYNOS8895_SMU_INIT,
++		      EXYNOS8895_SMU_EMBEDDED, 0, 0, 0, 0, 0, &res);
++	if (res.a0)
++		dev_warn(hba->dev, "SMC_CMD_SMU(SMU_INIT) failed: %ld\n", res.a0);
++
++	pmu = syscon_regmap_lookup_by_compatible("samsung,exynos8895-pmu");
++	if (!IS_ERR(pmu)) {
++		regmap_read(pmu, EXYNOS8895_PMU_UFS_OPTION, &reg);
++		dev_dbg(hba->dev, "PMU UFS option: %#x\n", reg);
++		regmap_update_bits(pmu, EXYNOS8895_PMU_UFS_OPTION, BIT(0),
++				   BIT(0));
++	}
++
++	/* Use the TCXO as the reference clock */
++	if (ufs->sysreg)
++		regmap_update_bits(ufs->sysreg, EXYNOS8895_UFS_TCXO_SEL,
++				   BIT(0), BIT(0));
++
++	/* set ACG to be controlled by UFS_ACG_DISABLE */
++	reg = hci_readl(ufs, HCI_IOP_ACG_DISABLE);
++	hci_writel(ufs, reg & ~HCI_IOP_ACG_DISABLE_EN, HCI_IOP_ACG_DISABLE);
++
++	return exynos_ufs_shareability(ufs);
++}
++
++static int exynos8895_ufs_pre_link(struct exynos_ufs *ufs)
++{
++	struct ufs_hba *hba = ufs->hba;
++	u32 pclk_period = UNIPRO_PCLK_PERIOD(ufs);
++	int i;
++
++	/* The lane loops below run before exynos_ufs_phy_init() */
++	if (!ufs->avail_ln_rx || !ufs->avail_ln_tx) {
++		ufshcd_dme_get(hba, UIC_ARG_MIB(PA_AVAILRXDATALANES),
++			       &ufs->avail_ln_rx);
++		ufshcd_dme_get(hba, UIC_ARG_MIB(PA_AVAILTXDATALANES),
++			       &ufs->avail_ln_tx);
++	}
++
++	/* M-PHY reference clock from the alternative (TCXO) path */
++	hci_writel(ufs, hci_readl(ufs, HCI_MPHY_REFCLK_SEL) | MPHY_REFCLK_SEL,
++		   HCI_MPHY_REFCLK_SEL);
++	/* Disable hardware auto clock gating */
++	hci_writel(ufs, hci_readl(ufs, HCI_UFS_ACG_DISABLE) |
++		   HCI_UFS_ACG_DISABLE_EN, HCI_UFS_ACG_DISABLE);
++
++	ufshcd_dme_set(hba, UIC_ARG_MIB(EXYNOS8895_PCS_OV_TM), 0x40);
++
++	for_each_ufs_rx_lane(ufs, i)
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x12, i), pclk_period);
++	for_each_ufs_tx_lane(ufs, i)
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0xAA, i), pclk_period);
++
++	for_each_ufs_rx_lane(ufs, i) {
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x5C, i), 0x38);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x0F, i), 0x0);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x65, i), 0x1);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x69, i), 0x1);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x21, i), 0x0);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x22, i), 0x0);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x84, i), 0x1);
++	}
++
++	/* TX PWM Gear Capability / PWM_G1_ONLY */
++	for_each_ufs_tx_lane(ufs, i)
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x04, i), 0x1);
++
++	ufshcd_dme_set(hba, UIC_ARG_MIB(EXYNOS8895_PCS_OV_TM), 0x0);
++
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_DBG_AUTOMODE_THLD), 0x4E20);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_DBG_OPTION_SUITE), 0x2e820183);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0x0);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID), 0x0);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID_VALID), 0x1);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(T_PEERDEVICEID), 0x1);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(T_CONNECTIONSTATE), CPORT_CONNECTED);
++
++	return 0;
++}
++
++static int exynos8895_ufs_post_link(struct exynos_ufs *ufs)
++{
++	struct ufs_hba *hba = ufs->hba;
++	u32 peer_rx_min_actv_time_cap;
++	u32 max_rx_hibern8_time_cap;
++	int i;
++
++	/* 1us tick of the interrupt aggregation timer, from the mclk */
++	hci_writel(ufs, (ufs->mclk_rate / USEC_PER_SEC) & CNT_VAL_1US_MASK,
++		   HCI_1US_TO_CNT_VAL);
++	hci_writel(ufs, WLU_EN | WLU_BURST_LEN(3), HCI_AXIDMA_RWDATA_BURST_LEN);
++
++	ufshcd_dme_get(hba, UIC_ARG_MIB(PA_TACTIVATE),
++		       &peer_rx_min_actv_time_cap);
++	ufshcd_dme_get(hba, UIC_ARG_MIB(PA_HIBERN8TIME),
++		       &max_rx_hibern8_time_cap);
++	if (peer_rx_min_actv_time_cap >= EXYNOS8895_RX_MIN_ACTV_TIME_CAP)
++		ufshcd_dme_peer_set(hba, UIC_ARG_MIB(PA_TACTIVATE),
++				    peer_rx_min_actv_time_cap + 1);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_HIBERN8TIME),
++		       max_rx_hibern8_time_cap + 1);
++
++	exynos_ufs_enable_dbg_mode(hba);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_SAVECONFIGTIME), 0xFA);
++	exynos_ufs_disable_dbg_mode(hba);
++
++	ufshcd_dme_set(hba, UIC_ARG_MIB(EXYNOS8895_PCS_OV_TM), 0x40);
++	for_each_ufs_rx_lane(ufs, i) {
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x35, i), 0x05);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x73, i), 0x01);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x41, i), 0x02);
++		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x42, i), 0xAC);
++	}
++	ufshcd_dme_set(hba, UIC_ARG_MIB(EXYNOS8895_PCS_OV_TM), 0x0);
++
++	return 0;
++}
++
++static int exynos8895_ufs_pre_pwr_change(struct exynos_ufs *ufs,
++					 struct ufs_pa_layer_attr *pwr)
++{
++	struct ufs_hba *hba = ufs->hba;
++
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_TXTERMINATION), 0x1);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_RXTERMINATION), 0x1);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PWRMODEUSERDATA0), 12000);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PWRMODEUSERDATA1), 32000);
++	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PWRMODEUSERDATA2), 16000);
++
++	unipro_writel(ufs, 8064, UNIPRO_DME_POWERMODE_REQ_LOCALL2TIMER0);
++	unipro_writel(ufs, 28224, UNIPRO_DME_POWERMODE_REQ_LOCALL2TIMER1);
++	unipro_writel(ufs, 20160, UNIPRO_DME_POWERMODE_REQ_LOCALL2TIMER2);
++	unipro_writel(ufs, 12000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER0);
++	unipro_writel(ufs, 32000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER1);
++	unipro_writel(ufs, 16000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER2);
++
++	return 0;
++}
++
++#define UNIPRO_DME_HIBERN8_ENTER_IND_RESULT	0x7868
++#define UNIPRO_DME_HIBERN8_EXIT_IND_RESULT	0x7878
++#define UNIPRO_DME_PWR_IND_RESULT		0x78EC
++
++/*
++ * The UPMCRS field of HCS only reads back PWR_OK on this host, the
++ * actual result of the request is reported by the UniPro block.
++ */
++static u8 exynos8895_ufs_get_upmcrs(struct ufs_hba *hba,
++				    const struct uic_command *cmd)
++{
++	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
++
++	switch (cmd->command) {
++	case UIC_CMD_DME_SET:
++		return unipro_readl(ufs, UNIPRO_DME_PWR_IND_RESULT);
++	case UIC_CMD_DME_HIBER_ENTER:
++		return unipro_readl(ufs, UNIPRO_DME_HIBERN8_ENTER_IND_RESULT);
++	case UIC_CMD_DME_HIBER_EXIT:
++		return unipro_readl(ufs, UNIPRO_DME_HIBERN8_EXIT_IND_RESULT);
++	default:
++		return (ufshcd_readl(hba, REG_CONTROLLER_STATUS) >> 8) & 0x7;
++	}
++}
++
+ static inline u32 get_mclk_period_unipro_18(struct exynos_ufs *ufs)
+ {
+ 	return (16 * 1000 * 1000000UL / ufs->mclk_rate);
+@@ -2118,6 +2325,23 @@ static const struct ufs_hba_variant_ops ufs_hba_exynos_ops = {
+ 	.fill_crypto_prdt		= exynos_ufs_fmp_fill_prdt,
+ };
+ 
++static const struct ufs_hba_variant_ops ufs_hba_exynos8895_ops = {
++	.name				= "exynos8895_ufs",
++	.init				= exynos_ufs_init,
++	.exit				= exynos_ufs_exit,
++	.hce_enable_notify		= exynos_ufs_hce_enable_notify,
++	.link_startup_notify		= exynos_ufs_link_startup_notify,
++	.negotiate_pwr_mode		= exynos_ufs_negotiate_pwr_mode,
++	.pwr_change_notify		= exynos_ufs_pwr_change_notify,
++	.setup_clocks			= exynos_ufs_setup_clocks,
++	.setup_xfer_req			= exynos_ufs_specify_nexus_t_xfer_req,
++	.setup_task_mgmt		= exynos_ufs_specify_nexus_t_tm_req,
++	.hibern8_notify			= exynos_ufs_hibern8_notify,
++	.get_upmcrs			= exynos8895_ufs_get_upmcrs,
++	.suspend			= exynos_ufs_suspend,
++	.resume				= exynos_ufs_resume,
++};
++
+ static struct ufs_hba_variant_ops ufs_hba_exynosauto_vh_ops = {
+ 	.name				= "exynosauto_ufs_vh",
+ 	.init				= exynosauto_ufs_vh_init,
+@@ -2275,6 +2499,34 @@ static const struct exynos_ufs_drv_data fsd_ufs_drvs = {
+ 	.suspend                = fsd_ufs_suspend,
+ };
+ 
++static struct exynos_ufs_uic_attr exynos8895_uic_attr = {
++	.tx_trailingclks		= 0x10,
++	.pa_dbg_clk_period_off		= PA_DBG_CLK_PERIOD,
++	.pa_dbg_opt_suite1_val		= 0x2e820183,
++	.pa_dbg_opt_suite1_off		= PA_DBG_OPTION_SUITE,
++};
++
++static const struct exynos_ufs_drv_data exynos8895_ufs_drvs = {
++	.vops			= &ufs_hba_exynos8895_ops,
++	.uic_attr		= &exynos8895_uic_attr,
++	.quirks			= UFSHCD_QUIRK_PRDT_BYTE_GRAN |
++				  UFSHCI_QUIRK_BROKEN_REQ_LIST_CLR |
++				  UFSHCI_QUIRK_SKIP_RESET_INTR_AGGR |
++				  UFSHCD_QUIRK_BROKEN_OCS_FATAL_ERROR |
++				  UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8 |
++				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING,
++	.opts			= EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL |
++				  EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR |
++				  EXYNOS_UFS_OPT_UFSPR_SECURE |
++				  EXYNOS_UFS_OPT_TIMER_TICK_SELECT |
++				  EXYNOS_UFS_OPT_SKIP_SYNC_PATTERN_MASK,
++	.iocc_mask		= UFS_EXYNOS8895_SHARABLE,
++	.drv_init		= exynos8895_ufs_drv_init,
++	.pre_link		= exynos8895_ufs_pre_link,
++	.post_link		= exynos8895_ufs_post_link,
++	.pre_pwr_change		= exynos8895_ufs_pre_pwr_change,
++};
++
+ static const struct exynos_ufs_drv_data gs101_ufs_drvs = {
+ 	.uic_attr		= &gs101_uic_attr,
+ 	.quirks			= UFSHCD_QUIRK_PRDT_BYTE_GRAN |
+@@ -2314,6 +2566,8 @@ static const struct of_device_id exynos_ufs_of_match[] = {
+ 	  .data	      = &gs101_ufs_drvs },
+ 	{ .compatible = "samsung,exynos7-ufs",
+ 	  .data	      = &exynos_ufs_drvs },
++	{ .compatible = "samsung,exynos8895-ufs",
++	  .data	      = &exynos8895_ufs_drvs },
+ 	{ .compatible = "samsung,exynosautov9-ufs",
+ 	  .data	      = &exynosauto_ufs_drvs },
+ 	{ .compatible = "samsung,exynosautov9-ufs-vh",
+diff --git a/drivers/ufs/host/ufs-exynos.h b/drivers/ufs/host/ufs-exynos.h
+index abe7e4727..a7d262d46 100644
+--- a/drivers/ufs/host/ufs-exynos.h
++++ b/drivers/ufs/host/ufs-exynos.h
+@@ -245,6 +245,7 @@ struct exynos_ufs {
+ #define EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR	BIT(5)
+ #define EXYNOS_UFS_OPT_UFSPR_SECURE		BIT(6)
+ #define EXYNOS_UFS_OPT_TIMER_TICK_SELECT	BIT(7)
++#define EXYNOS_UFS_OPT_SKIP_SYNC_PATTERN_MASK	BIT(8)
+ };
+ 
+ #define for_each_ufs_rx_lane(ufs, i) \
+diff --git a/include/ufs/ufshcd.h b/include/ufs/ufshcd.h
+index dfd302f2d..b9466db38 100644
+--- a/include/ufs/ufshcd.h
++++ b/include/ufs/ufshcd.h
+@@ -394,6 +394,8 @@ struct ufshcd_tx_eq_params {
+  * @setup_task_mgmt: called before any task management request is issued
+  *                  to set some things
+  * @hibern8_notify: called around hibern8 enter/exit
++ * @get_upmcrs: called to get the result of a power mode change or hibern8
++ *	enter/exit for hosts that don't report it in the UPMCRS field of HCS
+  * @apply_dev_quirks: called to apply device specific quirks
+  * @fixup_dev_quirks: called to modify device specific quirks
+  * @suspend: called during host controller PM callback
+@@ -446,6 +448,8 @@ struct ufs_hba_variant_ops {
+ 	void	(*setup_task_mgmt)(struct ufs_hba *, int, u8);
+ 	void    (*hibern8_notify)(struct ufs_hba *, enum uic_cmd_dme,
+ 					enum ufs_notify_change_status);
++	u8	(*get_upmcrs)(struct ufs_hba *hba,
++			      const struct uic_command *cmd);
+ 	int	(*apply_dev_quirks)(struct ufs_hba *hba);
+ 	void	(*fixup_dev_quirks)(struct ufs_hba *hba);
+ 	int     (*suspend)(struct ufs_hba *, enum ufs_pm_op,

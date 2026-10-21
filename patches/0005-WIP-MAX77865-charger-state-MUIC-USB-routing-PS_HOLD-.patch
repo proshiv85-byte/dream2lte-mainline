@@ -1,0 +1,306 @@
+From 5a3237d2972ba2da948cee966f039a8bd3013c10 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Wed, 21 Oct 2026 21:05:56 +0300
+Subject: [PATCH 5/5] WIP: MAX77865 charger state + MUIC USB routing, PS_HOLD
+ poweroff
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../boot/dts/exynos/exynos8895-dream2lte.dts  |  13 +
+ drivers/power/supply/Kconfig                  |   8 +
+ drivers/power/supply/Makefile                 |   1 +
+ drivers/power/supply/max77865_charger.c       | 223 ++++++++++++++++++
+ 4 files changed, 245 insertions(+)
+ create mode 100644 drivers/power/supply/max77865_charger.c
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+index a762005cf..672ac1207 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -193,6 +193,12 @@ fuel-gauge@36 {
+ 		compatible = "maxim,max17050";
+ 		reg = <0x36>;
+ 		maxim,rsns-microohm = <10000>;
++		power-supplies = <&charger>;
++	};
++
++	charger: charger@69 {
++		compatible = "maxim,max77865-charger";
++		reg = <0x69>;
+ 	};
+ };
+ 
+@@ -309,6 +315,13 @@ reboot: syscon-reboot {
+ 		value = <0x1>;
+ 	};
+ 
++	poweroff: syscon-poweroff {
++		compatible = "syscon-poweroff";
++		offset = <0x330c>; /* PS_HOLD_CONTROL */
++		mask = <0x100>;
++		value = <0x0>;
++	};
++
+ 	/* S-Boot reads the reboot reason from INFORM3 */
+ 	reboot-mode {
+ 		compatible = "syscon-reboot-mode";
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index b89ef40df..140480c8d 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -653,6 +653,14 @@ config CHARGER_MAX77759
+ 
+ 	  If built as a module, it will be called max77759_charger.
+ 
++config CHARGER_MAX77865
++	tristate "Maxim MAX77865 charger"
++	depends on I2C
++	select REGMAP_I2C
++	help
++	  Reports the state of the charger of the Maxim MAX77865 PMIC, used
++	  in the Samsung Galaxy S8 and S8+, and routes USB to the SoC.
++
+ config CHARGER_MAX77976
+ 	tristate "Maxim MAX77976 battery charger driver"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index f3c0d1006..b049e997d 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -87,6 +87,7 @@ obj-$(CONFIG_CHARGER_DETECTOR_MAX14656)	+= max14656_charger_detector.o
+ obj-$(CONFIG_CHARGER_MAX77650)	+= max77650-charger.o
+ obj-$(CONFIG_CHARGER_MAX77693)	+= max77693_charger.o
+ obj-$(CONFIG_CHARGER_MAX77705)	+= max77705_charger.o
++obj-$(CONFIG_CHARGER_MAX77865)	+= max77865_charger.o
+ obj-$(CONFIG_CHARGER_MAX77976)	+= max77976_charger.o
+ obj-$(CONFIG_CHARGER_MAX8971)	+= max8971_charger.o
+ obj-$(CONFIG_CHARGER_MAX8997)	+= max8997_charger.o
+diff --git a/drivers/power/supply/max77865_charger.c b/drivers/power/supply/max77865_charger.c
+new file mode 100644
+index 000000000..477affaca
+--- /dev/null
++++ b/drivers/power/supply/max77865_charger.c
+@@ -0,0 +1,223 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Charger of the Maxim MAX77865 PMIC (Samsung Galaxy S8/S8+)
++ *
++ * The charger runs autonomously with the settings left by the bootloader;
++ * this driver only reports its state. It also routes the USB data lines to
++ * the SoC with the MUIC of the same chip, which the bootloader leaves open.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#define MAX77865_CHG_REG_DETAILS_00	0xb3
++#define MAX77865_CHGIN_DTLS		GENMASK(6, 5)
++#define MAX77865_CHGIN_VALID		0x3
++#define MAX77865_CHG_REG_DETAILS_01	0xb4
++#define MAX77865_CHG_DTLS		GENMASK(3, 0)
++
++#define MAX77865_MUIC_ADDR		0x25
++#define MAX77865_MUIC_REG_CONTROL1	0x19
++/* D+ and D- to the AP USB PHY, ID open, BC comparator off */
++#define MAX77865_MUIC_COM_USB_AP	0x89
++
++#define MAX77865_POLL_INTERVAL		(5 * HZ)
++
++struct max77865_charger {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct delayed_work poll;
++	int online;
++	int status;
++};
++
++static const struct regmap_config max77865_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = 0xff,
++};
++
++static int max77865_charger_read(struct max77865_charger *chg, int *online,
++				 int *status)
++{
++	unsigned int dtls0, dtls1;
++	int ret;
++
++	ret = regmap_read(chg->regmap, MAX77865_CHG_REG_DETAILS_00, &dtls0);
++	if (ret)
++		return ret;
++	ret = regmap_read(chg->regmap, MAX77865_CHG_REG_DETAILS_01, &dtls1);
++	if (ret)
++		return ret;
++
++	*online = FIELD_GET(MAX77865_CHGIN_DTLS, dtls0) == MAX77865_CHGIN_VALID;
++
++	switch (FIELD_GET(MAX77865_CHG_DTLS, dtls1)) {
++	case 0x0:	/* precharge */
++	case 0x1:	/* fast charge, constant current */
++	case 0x2:	/* fast charge, constant voltage */
++		*status = POWER_SUPPLY_STATUS_CHARGING;
++		break;
++	case 0x3:	/* top-off */
++	case 0x4:	/* done */
++		*status = POWER_SUPPLY_STATUS_FULL;
++		break;
++	case 0x5:	/* timer fault */
++	case 0x6:	/* thermal suspend */
++	case 0x7:	/* charger off */
++		*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
++		break;
++	case 0x8:	/* no valid input */
++	case 0xa:
++	case 0xb:
++		*status = POWER_SUPPLY_STATUS_DISCHARGING;
++		break;
++	default:
++		*status = POWER_SUPPLY_STATUS_UNKNOWN;
++		break;
++	}
++
++	return 0;
++}
++
++static int max77865_charger_get_property(struct power_supply *psy,
++					 enum power_supply_property psp,
++					 union power_supply_propval *val)
++{
++	struct max77865_charger *chg = power_supply_get_drvdata(psy);
++	int online, status, ret;
++
++	ret = max77865_charger_read(chg, &online, &status);
++	if (ret)
++		return ret;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		val->intval = online;
++		break;
++	case POWER_SUPPLY_PROP_STATUS:
++		val->intval = status;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static enum power_supply_property max77865_charger_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_STATUS,
++};
++
++static const struct power_supply_desc max77865_charger_desc = {
++	.name		= "max77865-charger",
++	.type		= POWER_SUPPLY_TYPE_USB,
++	.properties	= max77865_charger_props,
++	.num_properties	= ARRAY_SIZE(max77865_charger_props),
++	.get_property	= max77865_charger_get_property,
++};
++
++/* There is no interrupt support yet, poll for cable and charging changes */
++static void max77865_charger_poll(struct work_struct *work)
++{
++	struct max77865_charger *chg = container_of(work, struct max77865_charger,
++						    poll.work);
++	int online, status;
++
++	if (!max77865_charger_read(chg, &online, &status) &&
++	    (online != chg->online || status != chg->status)) {
++		chg->online = online;
++		chg->status = status;
++		power_supply_changed(chg->psy);
++	}
++
++	schedule_delayed_work(&chg->poll, MAX77865_POLL_INTERVAL);
++}
++
++static void max77865_charger_stop_poll(void *data)
++{
++	struct max77865_charger *chg = data;
++
++	cancel_delayed_work_sync(&chg->poll);
++}
++
++static int max77865_muic_route_usb(struct device *dev,
++				   struct i2c_client *client)
++{
++	struct i2c_client *muic;
++	int ret;
++
++	muic = devm_i2c_new_dummy_device(dev, client->adapter,
++					 MAX77865_MUIC_ADDR);
++	if (IS_ERR(muic))
++		return PTR_ERR(muic);
++
++	ret = i2c_smbus_write_byte_data(muic, MAX77865_MUIC_REG_CONTROL1,
++					MAX77865_MUIC_COM_USB_AP);
++
++	return ret < 0 ? ret : 0;
++}
++
++static int max77865_charger_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct power_supply_config psy_cfg = { };
++	struct max77865_charger *chg;
++	int ret;
++
++	chg = devm_kzalloc(dev, sizeof(*chg), GFP_KERNEL);
++	if (!chg)
++		return -ENOMEM;
++
++	chg->dev = dev;
++	chg->regmap = devm_regmap_init_i2c(client, &max77865_regmap_config);
++	if (IS_ERR(chg->regmap))
++		return dev_err_probe(dev, PTR_ERR(chg->regmap),
++				     "failed to init regmap\n");
++
++	ret = max77865_muic_route_usb(dev, client);
++	if (ret)
++		dev_warn(dev, "failed to route USB to the AP: %d\n", ret);
++
++	psy_cfg.drv_data = chg;
++	psy_cfg.fwnode = dev_fwnode(dev);
++	chg->psy = devm_power_supply_register(dev, &max77865_charger_desc,
++					      &psy_cfg);
++	if (IS_ERR(chg->psy))
++		return dev_err_probe(dev, PTR_ERR(chg->psy),
++				     "failed to register power supply\n");
++
++	chg->online = -1;
++	INIT_DELAYED_WORK(&chg->poll, max77865_charger_poll);
++	ret = devm_add_action_or_reset(dev, max77865_charger_stop_poll, chg);
++	if (ret)
++		return ret;
++	schedule_delayed_work(&chg->poll, 0);
++
++	return 0;
++}
++
++static const struct of_device_id max77865_charger_of_match[] = {
++	{ .compatible = "maxim,max77865-charger" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, max77865_charger_of_match);
++
++static struct i2c_driver max77865_charger_driver = {
++	.driver = {
++		.name = "max77865-charger",
++		.of_match_table = max77865_charger_of_match,
++	},
++	.probe = max77865_charger_probe,
++};
++module_i2c_driver(max77865_charger_driver);
++
++MODULE_DESCRIPTION("Maxim MAX77865 charger driver");
++MODULE_LICENSE("GPL");

@@ -1,0 +1,41 @@
+#!/bin/sh
+# Mainline bring-up helper (installed by the mainline-dream2lte work):
+# boots /sbin/init normally; 120 s later saves logs to /root/mainline/log-N
+# and, if /root/mainline/autorecovery exists, reboots into TWRP.
+M=/root/mainline
+(
+	sleep ${D2L_DELAY:-120}
+	n=$(cat $M/count 2>/dev/null || echo 0); n=$((n + 1)); echo $n > $M/count
+	D=$M/log-$n
+	mkdir -p $D
+	dmesg > $D/dmesg 2>&1
+	rc-status -a > $D/rc-status 2>&1
+	ps -ef > $D/ps 2>&1
+	cp /var/log/rc.log $D/ 2>/dev/null
+	cp /root/usbnet.log $D/ 2>/dev/null
+	cp /home/armtix/.local/state/sway.log $D/ 2>/dev/null
+	ls -la /dev/input /dev/dri /dev/fb0 > $D/dev 2>&1
+	cat /proc/interrupts > $D/interrupts
+	ip a > $D/ip 2>&1
+	free -m > $D/free
+	mount -t debugfs none /sys/kernel/debug 2>/dev/null
+	{
+		echo "== deferred"; cat /sys/kernel/debug/devices_deferred
+		echo "== udc"; ls -la /sys/class/udc
+		echo "== usb platform devices"; ls -la /sys/bus/platform/devices/ | grep -iE "usb|phy"
+		for d in /sys/bus/platform/devices/*usb* /sys/bus/platform/devices/*phy*; do
+			echo "$d -> $(readlink $d/driver)"
+		done
+		echo "== mounts"; grep -E "configfs|debugfs" /proc/mounts
+		echo "== configfs"; ls -la /sys/kernel/config
+		echo "== clk"; grep -iE "usb|ufs" /sys/kernel/debug/clk/clk_summary
+		echo "== devlinks"; ls /sys/class/devlink | grep -iE "usb|phy"
+	} > $D/state 2>&1
+	sync
+	# stay up if USB networking works (then the phone is reachable by ssh)
+	if [ -e $M/autorecovery ] && uname -r | grep -q dream2lte &&
+	   [ "$(cat /sys/class/net/usb0/carrier 2>/dev/null)" != 1 ]; then
+		$M/rbt recovery
+	fi
+) </dev/null >/dev/null 2>&1 &
+exec /sbin/init "$@"

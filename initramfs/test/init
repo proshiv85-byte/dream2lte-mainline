@@ -1,0 +1,50 @@
+#!/bin/busybox sh
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /sys/fs/pstore; mount -t pstore pstore /sys/fs/pstore
+rm -f /sys/fs/pstore/dmesg-ramoops-*
+mount -t tmpfs -o size=1g tmpfs /tmp
+
+log() { echo "D2L: $*" > /dev/kmsg; echo "D2L: $*"; }
+
+log "=== integrity test: $(uname -r) ==="
+for i in $(seq 1 30); do [ -e /dev/sda27 ] && break; sleep 0.5; done
+for r in 0x16480620 0x16480724; do log "reg $r = $(devmem $r)"; done
+
+t0=$(cut -d. -f1 /proc/uptime)
+log "sda19: $(sha256sum /dev/sda19 | cut -c1-64) (ref c529c101b9910345229a04ff3a8242168f8b706a0976c50ddc7cefc6251dd3ab) $(( $(cut -d. -f1 /proc/uptime) - t0 ))s"
+log "cpufreq: $(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>&1 | tr '\n' ' ')"
+t0=$(cut -d. -f1 /proc/uptime)
+: log "sda17: $(sha256sum /dev/sda17 | cut -c1-64) (ref f4d076c7c2cb835d742c8256b8fe739a132b1671d3a53bec28e35a9041bd6635) $(( $(cut -d. -f1 /proc/uptime) - t0 ))s"
+
+mkdir -p /mnt
+if mount -t ext4 -o ro,noload /dev/sda27 /mnt; then
+	t0=$(cut -d. -f1 /proc/uptime)
+	h=$(cd /mnt && find usr/lib -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
+	log "usrlib: $h (ref 7e45c2cf06b5f57973ab321533fb9a5253eb250c55be2a0ccd7071338e69a913) $(( $(cut -d. -f1 /proc/uptime) - t0 ))s"
+	umount /mnt
+fi
+
+# write test on CACHE (sda21), original kept in RAM and restored
+dd if=/dev/sda21 of=/tmp/orig bs=1M 2>/dev/null
+O=$(sha256sum /tmp/orig | cut -c1-64)
+log "cache orig: $O size $(stat -c %s /tmp/orig)"
+dd if=/dev/urandom of=/tmp/pat bs=1M count=$(( $(stat -c %s /tmp/orig) / 1048576 )) 2>/dev/null
+P=$(sha256sum /tmp/pat | cut -c1-64)
+dd if=/tmp/pat of=/dev/sda21 bs=1M conv=fsync 2>/dev/null
+echo 3 > /proc/sys/vm/drop_caches
+R=$(dd if=/dev/sda21 bs=1M count=$(( $(stat -c %s /tmp/pat) / 1048576 )) iflag=direct 2>/dev/null | sha256sum | cut -c1-64)
+[ "$R" = "$P" ] && log "WRITE TEST OK" || log "WRITE TEST MISMATCH $R != $P"
+rm /tmp/pat
+dd if=/tmp/orig of=/dev/sda21 bs=1M conv=fsync 2>/dev/null
+echo 3 > /proc/sys/vm/drop_caches
+R=$(dd if=/dev/sda21 bs=1M iflag=direct 2>/dev/null | sha256sum | cut -c1-64)
+[ "$R" = "$O" ] && log "CACHE RESTORED OK" || log "CACHE RESTORE MISMATCH $R"
+
+dmesg | grep -iE 'ufs|scsi|error|fail|warn|timeout|bug|Unhandled|SError' |
+	grep -vE 'D2L:|populate_vreg|Well-known|clkout|device link' | tail -40 | while read -r l; do log "K: $l"; done
+log "=== test done ==="
+for i in $(seq 10 -1 1); do echo "rebooting to TWRP in $i"; sleep 1; done
+/bin/rbt recovery

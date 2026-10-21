@@ -1,0 +1,45 @@
+#!/bin/busybox sh
+# dream2lte mainline: mount the ARMtix root filesystem and switch to it.
+# d2l.root=<dev> and d2l.init=<path> on the command line override the defaults.
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+log() { echo "d2l-initramfs: $*" > /dev/kmsg; }
+
+root=/dev/sda27
+init=/sbin/init
+for arg in $(cat /proc/cmdline); do
+	case $arg in
+	d2l.root=*) root=${arg#*=} ;;
+	d2l.init=*) init=${arg#*=} ;;
+	esac
+done
+
+for i in $(seq 1 100); do
+	[ -b "$root" ] && break
+	sleep 0.1
+done
+
+mkdir -p /newroot
+if mount -t ext4 -o rw "$root" /newroot; then
+	if ! [ -e "/newroot$init" ] && ! [ -L "/newroot$init" ]; then
+		log "$init not found on $root, using /sbin/init"
+		init=/sbin/init
+	fi
+	if [ -e "/newroot$init" ] || [ -L "/newroot$init" ]; then
+		log "switching to $root $init"
+		mount --move /dev /newroot/dev
+		umount /sys /proc
+		exec switch_root /newroot "$init"
+	fi
+	log "$init not found on $root"
+	umount /newroot
+else
+	log "cannot mount $root"
+fi
+
+log "rebooting to recovery in 10s"
+sleep 10
+/bin/rbt recovery

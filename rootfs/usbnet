@@ -1,0 +1,139 @@
+#!/usr/bin/openrc-run
+# ARMtix USB networking (RNDIS): Samsung android_usb flow on the 4.4 kernel,
+# standard configfs binding on mainline.
+# This kernel (CONFIG_USB_CONFIGFS_UEVENT) requires the Samsung-specific
+# flow: ln -s puts the function into linked_func, then the "functions" sysfs
+# moves it to func_list, then "enable" binds to the UDC and pulls up.
+#
+# Host (Linux, rndis_host): ip addr add 172.16.42.2/24 dev <if> && ip link set <if> up
+# Then: ssh root@172.16.42.1  (password: armtix)  or  http://172.16.42.1/
+
+description="USB RNDIS networking (Samsung android_usb flow) and status page"
+
+depend() {
+	need localmount
+	after udev-trigger dhcpcd
+	before sshd
+}
+
+start() {
+	LOG=/root/usbnet.log
+	GUARD=/root/usbnet.crashguard
+	# Crash guard (armed below, cleared after enable=1 returns): if the
+	# previous boot died inside this service, don't try again (avoids a bootloop) and save the
+	# previous kernel's log, which holds the panic.
+	if [ -e "$GUARD" ]; then
+		{
+			echo "=== usbnet $(date -u): previous boot crashed during USB enable; SKIPPING enable ==="
+			echo "remove $GUARD to retry"
+		} >> "$LOG"
+		cat /proc/last_kmsg > /root/usbnet-crash-last_kmsg.log 2>&1
+		sync
+		return 0
+	fi
+	step() { echo "[step $(cut -d' ' -f1 /proc/uptime)] $*"; sync; }
+	mv -f "$LOG" "$LOG.prev" 2>/dev/null
+	# only the Samsung flow has crashed the kernel so far
+	[ -d /sys/class/android_usb/android0 ] && { : > "$GUARD"; sync; }
+	{
+		echo "=== usbnet $(date -u) ==="
+		step "start"
+		UDC=$(ls /sys/class/udc/ 2>/dev/null | head -n1)
+		echo "UDC=$UDC"
+		echo "android0 present: $(ls /sys/class/android_usb/android0/ 2>&1)"
+
+		mount -t configfs none /sys/kernel/config 2>/dev/null
+		G=/sys/kernel/config/usb_gadget/g1
+		mkdir -p "$G" || { echo "cannot mkdir $G"; exit 1; }
+		cd "$G" || exit 1
+
+		echo 0x04e8 > idVendor 2>&1
+		echo 0x6860 > idProduct 2>&1
+		echo 0x0100 > bcdDevice 2>&1
+		echo 0x0200 > bcdUSB 2>&1
+		mkdir -p strings/0x409
+		echo "ARMtix" > strings/0x409/manufacturer
+		echo "ARMtix dream2lte" > strings/0x409/product
+		# USB serial = the phone serial number from the bootloader
+		sed -n "s/.*androidboot.serialno=\([^ ]*\).*/\1/p" /proc/cmdline > strings/0x409/serialnumber
+
+		# 1. function + config + symlink (goes to linked_func)
+		mkdir -p functions/rndis.usb0
+		mkdir -p configs/c.1
+		echo 0x80 > configs/c.1/bmAttributes 2>&1
+		echo 250 > configs/c.1/MaxPower 2>&1
+		ln -sf functions/rndis.usb0 configs/c.1/rndis.usb0 2>&1
+		echo "config c.1: $(ls configs/c.1/ 2>&1)"
+		step "gadget configured"
+
+		if [ -d /sys/class/android_usb/android0 ]; then
+			# 2. Samsung: move linked_func -> func_list
+			echo "--- writing functions=rndis"
+			echo "rndis" > /sys/class/android_usb/android0/functions 2>&1
+			echo "functions rc=$?"
+			step "functions written"
+			echo "functions now: $(cat /sys/class/android_usb/android0/functions 2>&1)"
+
+			# 3. Samsung: enable (bind to UDC + usb_gadget_connect/pullup)
+			step "about to write enable=1"
+			( while :; do dmesg > /root/usbnet-dmesg.snap 2>&1; sync; sleep 0.2; done ) &
+			SNAP=$!
+			sleep 1
+			echo "--- writing enable=1"
+			echo 1 > /sys/class/android_usb/android0/enable 2>&1
+			echo "enable rc=$?"
+			step "enable=1 returned"
+			sleep 2; kill $SNAP 2>/dev/null
+			dmesg > /root/usbnet-dmesg.snap 2>&1
+			rm -f "$GUARD"
+			echo "enable now: $(cat /sys/class/android_usb/android0/enable 2>&1)"
+			echo "state now: $(cat /sys/class/android_usb/android0/state 2>&1)"
+		else
+			# Mainline kernel: standard configfs binding
+			step "binding to $UDC"
+			echo "$UDC" > UDC 2>&1
+			echo "UDC rc=$?"
+			rm -f "$GUARD"
+			echo "state now: $(cat /sys/class/udc/$UDC/state 2>&1)"
+		fi
+
+		echo "--- dmesg dwc3/phy/revision (early boot):"
+		dmesg | grep -iE 'dwc3|phy|usbdrd|extcon|revision|vbus|ccic|usb_noti' | head -60
+
+		echo "--- dmesg usb (bind):"
+		dmesg | grep -iE 'gadget|udc|dwc3|rndis|ncm|usb_udc|android_usb|configfs' | tail -40
+
+		# 4. bring up the netdev (dynamic name detection)
+		sleep 3
+		echo "--- netdevs:"; ip -o link show 2>&1
+		IF=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | tr -d ':' | grep -vE '^(lo|sit0|ip6tnl0|dummy0)$' | grep -iE 'usb|rndis|ncm|eth|enx' | head -1)
+		echo "chosen netdev: ${IF:-<none>}"
+		if [ -n "$IF" ]; then
+			ip link set "$IF" up 2>&1
+			ip addr add 172.16.42.1/24 dev "$IF" 2>&1
+			ip -4 addr show "$IF" 2>&1
+			# Internet via the host (NetworkManager "shared" mode on the PC
+			# NATs 172.16.42.0/24); harmless if the host doesn't share.
+			# metric 4000: WiFi (dhcpcd, ~3000) wins when up; USB is the fallback
+			ip route replace default via 172.16.42.2 dev "$IF" metric 4000 2>&1
+			grep -q '^nameserver' /etc/resolv.conf 2>/dev/null || \
+				echo "nameserver 172.16.42.2" >> /etc/resolv.conf
+		fi
+	} >> "$LOG" 2>&1
+	sync
+
+	# optional status page; the shipped busybox has no httpd applet
+	if /usr/local/sbin/busybox --list 2>/dev/null | grep -qx httpd; then
+		ebegin "Starting status page (http://172.16.42.1/)"
+		start-stop-daemon --start --background --make-pidfile \
+			--pidfile /run/armtix-httpd.pid \
+			--exec /usr/local/sbin/busybox -- httpd -f -p 80 -h /var/www -c /var/www/cgi-bin
+		eend $?
+	fi
+}
+
+stop() {
+	ebegin "Stopping status page"
+	start-stop-daemon --stop --pidfile /run/armtix-httpd.pid 2>/dev/null
+	eend 0
+}

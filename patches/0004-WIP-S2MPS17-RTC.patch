@@ -1,0 +1,246 @@
+From 769d54311ca3f42565ff45dec9296887c03e5b1f Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Wed, 21 Oct 2026 21:02:30 +0300
+Subject: [PATCH 4/5] WIP: S2MPS17 RTC
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../boot/dts/exynos/exynos8895-dream2lte.dts  |   5 +
+ drivers/rtc/Kconfig                           |   8 +
+ drivers/rtc/Makefile                          |   1 +
+ drivers/rtc/rtc-s2mps17.c                     | 179 ++++++++++++++++++
+ 4 files changed, 193 insertions(+)
+ create mode 100644 drivers/rtc/rtc-s2mps17.c
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+index 6aadb8194..a762005cf 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -283,6 +283,11 @@ tsp_avdd: LDO35 {
+ 			};
+ 		};
+ 	};
++
++	rtc@2 {
++		compatible = "samsung,s2mps17-rtc";
++		reg = <0x2>;
++	};
+ };
+ 
+ &ufs {
+diff --git a/drivers/rtc/Kconfig b/drivers/rtc/Kconfig
+index 05b9233b9..5c11796a0 100644
+--- a/drivers/rtc/Kconfig
++++ b/drivers/rtc/Kconfig
+@@ -764,6 +764,14 @@ config RTC_DRV_RV8803
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called rtc-rv8803.
+ 
++config RTC_DRV_S2MPS17
++	tristate "Samsung S2MPS17 RTC"
++	depends on I2C
++	select REGMAP_I2C
++	help
++	  RTC of the Samsung S2MPS17 PMIC, connected to the SoC over the
++	  SPEEDY bus on Exynos8895 boards.
++
+ config RTC_DRV_S5M
+ 	tristate "Samsung S2M/S5M series"
+ 	depends on MFD_SEC_CORE || COMPILE_TEST
+diff --git a/drivers/rtc/Makefile b/drivers/rtc/Makefile
+index 0347645b0..af6379776 100644
+--- a/drivers/rtc/Makefile
++++ b/drivers/rtc/Makefile
+@@ -167,6 +167,7 @@ obj-$(CONFIG_RTC_DRV_RENESAS_RTCA3)	+= rtc-renesas-rtca3.o
+ obj-$(CONFIG_RTC_DRV_S32G)	+= rtc-s32g.o
+ obj-$(CONFIG_RTC_DRV_S35390A)	+= rtc-s35390a.o
+ obj-$(CONFIG_RTC_DRV_S3C)	+= rtc-s3c.o
++obj-$(CONFIG_RTC_DRV_S2MPS17)	+= rtc-s2mps17.o
+ obj-$(CONFIG_RTC_DRV_S5M)	+= rtc-s5m.o
+ obj-$(CONFIG_RTC_DRV_SA1100)	+= rtc-sa1100.o
+ obj-$(CONFIG_RTC_DRV_SC27XX)	+= rtc-sc27xx.o
+diff --git a/drivers/rtc/rtc-s2mps17.c b/drivers/rtc/rtc-s2mps17.c
+new file mode 100644
+index 000000000..6e568c554
+--- /dev/null
++++ b/drivers/rtc/rtc-s2mps17.c
+@@ -0,0 +1,179 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * RTC of the Samsung S2MPS17 PMIC
++ *
++ * The RTC block of the PMIC is reached through its own SPEEDY address.
++ * The counters run in binary 24h mode as set up by the bootloader; alarms
++ * are not supported yet.
++ */
++
++#include <linux/bitops.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regmap.h>
++#include <linux/rtc.h>
++
++#define S2MPS17_RTC_REG_CTRL		0x00
++#define S2MPS17_RTC_REG_UPDATE		0x02
++#define S2MPS17_RTC_REG_SEC		0x05
++
++#define S2MPS17_RTC_CTRL_BCD_EN		BIT(0)
++#define S2MPS17_RTC_CTRL_MODEL24	BIT(1)
++/* latch the counters for reading / commit written counters */
++#define S2MPS17_RTC_UPDATE_RUDR		BIT(0)
++#define S2MPS17_RTC_UPDATE_WUDR		BIT(1)
++#define S2MPS17_RTC_HOUR_PM		BIT(6)
++
++enum {
++	RTC_SEC,
++	RTC_MIN,
++	RTC_HOUR,
++	RTC_WEEKDAY,
++	RTC_DATE,
++	RTC_MONTH,
++	RTC_YEAR,
++	RTC_NR_REGS,
++};
++
++struct s2mps17_rtc {
++	struct regmap *regmap;
++	struct rtc_device *rtc;
++};
++
++static int s2mps17_rtc_update(struct s2mps17_rtc *info, unsigned int bit)
++{
++	int ret;
++
++	ret = regmap_update_bits(info->regmap, S2MPS17_RTC_REG_UPDATE, bit, bit);
++	if (ret)
++		return ret;
++
++	/* the update takes effect within one 32 kHz-derived cycle */
++	usleep_range(1000, 1500);
++
++	return 0;
++}
++
++static int s2mps17_rtc_read_time(struct device *dev, struct rtc_time *tm)
++{
++	struct s2mps17_rtc *info = dev_get_drvdata(dev);
++	u8 data[RTC_NR_REGS];
++	int ret;
++
++	ret = s2mps17_rtc_update(info, S2MPS17_RTC_UPDATE_RUDR);
++	if (ret)
++		return ret;
++
++	ret = regmap_bulk_read(info->regmap, S2MPS17_RTC_REG_SEC, data,
++			       sizeof(data));
++	if (ret)
++		return ret;
++
++	tm->tm_sec = data[RTC_SEC] & 0x7f;
++	tm->tm_min = data[RTC_MIN] & 0x7f;
++	tm->tm_hour = data[RTC_HOUR] & 0x1f;
++	tm->tm_wday = data[RTC_WEEKDAY] & 0x7f ?
++		      __fls(data[RTC_WEEKDAY] & 0x7f) : 0;
++	tm->tm_mday = data[RTC_DATE] & 0x1f;
++	tm->tm_mon = (data[RTC_MONTH] & 0x0f) - 1;
++	tm->tm_year = (data[RTC_YEAR] & 0x7f) + 100;
++
++	return 0;
++}
++
++static int s2mps17_rtc_set_time(struct device *dev, struct rtc_time *tm)
++{
++	struct s2mps17_rtc *info = dev_get_drvdata(dev);
++	u8 data[RTC_NR_REGS];
++	int ret;
++
++	if (tm->tm_year < 100 || tm->tm_year > 227)
++		return -EINVAL;
++
++	data[RTC_SEC] = tm->tm_sec;
++	data[RTC_MIN] = tm->tm_min;
++	data[RTC_HOUR] = tm->tm_hour;
++	if (tm->tm_hour >= 12)
++		data[RTC_HOUR] |= S2MPS17_RTC_HOUR_PM;
++	data[RTC_WEEKDAY] = BIT(tm->tm_wday);
++	data[RTC_DATE] = tm->tm_mday;
++	data[RTC_MONTH] = tm->tm_mon + 1;
++	data[RTC_YEAR] = tm->tm_year - 100;
++
++	ret = regmap_bulk_write(info->regmap, S2MPS17_RTC_REG_SEC, data,
++				sizeof(data));
++	if (ret)
++		return ret;
++
++	return s2mps17_rtc_update(info, S2MPS17_RTC_UPDATE_WUDR);
++}
++
++static const struct rtc_class_ops s2mps17_rtc_ops = {
++	.read_time = s2mps17_rtc_read_time,
++	.set_time = s2mps17_rtc_set_time,
++};
++
++static const struct regmap_config s2mps17_rtc_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = 0xff,
++};
++
++static int s2mps17_rtc_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct s2mps17_rtc *info;
++	unsigned int ctrl;
++	int ret;
++
++	info = devm_kzalloc(dev, sizeof(*info), GFP_KERNEL);
++	if (!info)
++		return -ENOMEM;
++
++	info->regmap = devm_regmap_init_i2c(client, &s2mps17_rtc_regmap_config);
++	if (IS_ERR(info->regmap))
++		return dev_err_probe(dev, PTR_ERR(info->regmap),
++				     "failed to init regmap\n");
++
++	ret = regmap_read(info->regmap, S2MPS17_RTC_REG_CTRL, &ctrl);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read control\n");
++
++	/* Only the binary 24h mode set up by the bootloader is supported */
++	if ((ctrl & (S2MPS17_RTC_CTRL_BCD_EN | S2MPS17_RTC_CTRL_MODEL24)) !=
++	    S2MPS17_RTC_CTRL_MODEL24)
++		return dev_err_probe(dev, -ENODEV,
++				     "unsupported counter mode %#x\n", ctrl);
++
++	dev_set_drvdata(dev, info);
++
++	info->rtc = devm_rtc_allocate_device(dev);
++	if (IS_ERR(info->rtc))
++		return PTR_ERR(info->rtc);
++
++	info->rtc->ops = &s2mps17_rtc_ops;
++	info->rtc->range_min = RTC_TIMESTAMP_BEGIN_2000;
++	info->rtc->range_max = RTC_TIMESTAMP_END_2099;
++
++	return devm_rtc_register_device(info->rtc);
++}
++
++static const struct of_device_id s2mps17_rtc_of_match[] = {
++	{ .compatible = "samsung,s2mps17-rtc" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s2mps17_rtc_of_match);
++
++static struct i2c_driver s2mps17_rtc_driver = {
++	.driver = {
++		.name = "rtc-s2mps17",
++		.of_match_table = s2mps17_rtc_of_match,
++	},
++	.probe = s2mps17_rtc_probe,
++};
++module_i2c_driver(s2mps17_rtc_driver);
++
++MODULE_DESCRIPTION("Samsung S2MPS17 RTC driver");
++MODULE_LICENSE("GPL");

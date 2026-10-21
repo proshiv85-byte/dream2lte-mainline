@@ -1,0 +1,12 @@
+/linux/
+/build/
+/out/
+/backup/
+*.log
+/initramfs/list.txt
+/tools/rbt
+/tools/devmem
+/tools/i2c
+/tools/gpioget
+/shim/shim.elf
+/shim/shim.bin
