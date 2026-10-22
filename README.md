@@ -17,6 +17,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 |---|---|
 | CPUs (8 cores), RAM (3.5 GB usable) | works |
 | CPU frequency scaling | works: A53 455–1690 MHz, Mongoose 741–2314 MHz, via the APM firmware (needs the DVFS plugin, see below) |
+| GPU (Mali-G71 MP20) | works: `panfrost` + Mesa (OpenGL ES / OpenGL), DVFS 260–546 MHz, sway renders on it |
 | WiFi (BCM4361) | works: scan and connect, 2.4 + 5 GHz, via `brcmfmac` (needs the Samsung firmware, see below) |
 | Thermal | works: CPU, GPU and ISP sensors, CPUs throttle at 80 °C (big) / 90 °C (little), shutdown at 115 °C |
 | Display | works through simple-framebuffer (no brightness, no screen off) |
@@ -50,6 +51,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
   WiFi chip; its outbound window is only 4 MiB, so the chip's 4 MiB RAM BAR
   is clipped and the register BAR moved above it on the bus
 - `brcmfmac`: BCM4361 support (PCIe, Samsung's firmware)
+- GPU: Mali-G71 node for `panfrost`, clocked through ACPM like the CPUs
 - `exynos8895_tmu`: temperature sensors of the 8895 TMU, thermal zones with
   cpufreq cooling
 
@@ -136,8 +138,10 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
 - [`rootfs/usbnet`](rootfs/usbnet): the `usbnet` service uses the Samsung
   `android_usb` flow on 4.4 and plain configfs on mainline
 - sway: on mainline the screen is the DRM output `Unknown-1` (simpledrm)
-  instead of `FBDEV-fb0`; `armtix-sway` writes the right name to
-  `~/.config/sway/output.conf`, which the sway config includes
+  instead of `FBDEV-fb0`; [`armtix-sway`](rootfs/armtix-sway) writes the right
+  name to `~/.config/sway/output.conf`, which the sway config includes. It
+  also picks the GPU driver: Mesa `panfrost` on mainline (no
+  `GALLIUM_DRIVER=llvmpipe`, no libhybris), libhybris on 4.4
 - PulseAudio: the speaker sink has to be optional (`.nofail`) while there is no
   sound driver, otherwise waybar's volume module hangs
 - [`rootfs/init-wrapper`](rootfs/init-wrapper): bring-up helper used with

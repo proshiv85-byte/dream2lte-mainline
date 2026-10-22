@@ -1,0 +1,53 @@
+#!/bin/sh
+# Start sway on the phone screen. Log: ~/.local/state/sway.log
+#
+# Display: wlroots' fbdev backend on /dev/fb0 (no KMS on the Exynos decon).
+# GPU: Mesa panfrost on the mainline kernel; on 4.4 the Android Mali driver
+# through libhybris (GLES2 renderer). Falls back to software rendering
+# (WLR_RENDERER=pixman) if that fails to start.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+# libinput needs libudev device properties, and udevd doesn't work on 4.4:
+# use libudev-zero. sway has file capabilities (cap_sys_nice), so the dynamic
+# linker would ignore LD_LIBRARY_PATH; starting it through ld.so avoids that
+# (sway just runs without the capability). Apps started from sway inherit it.
+export LD_LIBRARY_PATH=/usr/lib/libudev-zero${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+SWAY="/usr/lib/ld-linux-aarch64.so.1 --argv0 sway /usr/bin/sway"
+export LIBSEAT_BACKEND=seatd
+export WLR_LIBINPUT_NO_DEVICES=1
+export XDG_SESSION_TYPE=wayland XDG_SESSION_DESKTOP=sway XDG_CURRENT_DESKTOP=sway
+export MOZ_ENABLE_WAYLAND=1 QT_QPA_PLATFORM="wayland;xcb" SDL_VIDEODRIVER=wayland
+export GDK_BACKEND=wayland,x11 _JAVA_AWT_WM_NONREPARENTING=1
+# EGL apps render on the GPU: libhybris first, Mesa (llvmpipe) for what it
+# doesn't do (GBM, X11/Xwayland, desktop OpenGL apps: mesa-run <app>). Skip
+# Mesa's Zink attempt, there's no Vulkan driver.
+egl=/usr/share/glvnd/egl_vendor.d
+if [ "$(basename "$(readlink /sys/class/drm/renderD128/device/driver 2>/dev/null)")" = panfrost ]; then
+	# mainline kernel: the Mali GPU runs on Mesa's panfrost driver
+	[ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] &&
+		export __EGL_VENDOR_LIBRARY_FILENAMES=$egl/50_mesa.json
+else
+	export GALLIUM_DRIVER=llvmpipe
+	[ -z "$WLR_RENDERER" ] && [ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] &&
+		export __EGL_VENDOR_LIBRARY_FILENAMES=$egl/60_libhybris.json:$egl/50_mesa.json
+fi
+
+mkdir -p ~/.local/state
+# Output name for ~/.config/sway/config: the 4.4 kernel has no DRM device and
+# sway uses the fbdev backend, mainline has simpledrm (connector "Unknown-1").
+if [ -e /dev/dri/card0 ]; then out=Unknown-1; else out=FBDEV-fb0; fi
+echo "set \$out $out" > ~/.config/sway/output.conf
+log=~/.local/state/sway.log
+# keep a core file (~/core, kernel.core_pattern=core) if the compositor crashes
+ulimit -c unlimited 2>/dev/null
+[ -f "$log" ] && mv -f "$log" "$log.old"
+start=$(date +%s)
+dbus-run-session $SWAY "$@" > "$log" 2>&1
+rc=$?
+if [ $rc -ne 0 ] && [ -z "$WLR_RENDERER" ] && [ $(( $(date +%s) - start )) -lt 15 ]; then
+	# The GPU path failed to start (e.g. /vendor libraries missing):
+	# software rendering still gives a working desktop
+	mv -f "$log" "$log.gpu-failed"
+	unset __EGL_VENDOR_LIBRARY_FILENAMES
+	WLR_RENDERER=pixman exec dbus-run-session $SWAY "$@" > "$log" 2>&1
+fi
+exit $rc

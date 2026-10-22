@@ -1,0 +1,108 @@
+From 623e95741a8694e0b21136423b9f410f6679348e Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Thu, 22 Oct 2026 19:11:32 +0300
+Subject: [PATCH 8/8] WIP: Exynos8895 Mali-G71 GPU for panfrost
+
+DT node for the Mali-G71 MP20 (arm,mali-bifrost), its clock is the ACPM
+G3D DVFS clock (the APM firmware sets the voltage), OPPs 260-546 MHz from
+the vendor table, GPU cooling on the GPU thermal zone. The G3D power
+domain is left on as the bootloader configures it.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi | 55 +++++++++++++++++++++-
+ 1 file changed, 53 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index 7085df6e4..7e1edd212 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -281,6 +281,30 @@ opp-1690000000 {
+ 		};
+ 	};
+ 
++	gpu_opp_table: opp-table-2 {
++		compatible = "operating-points-v2";
++
++		opp-260000000 {
++			opp-hz = /bits/ 64 <260000000>;
++		};
++
++		opp-338000000 {
++			opp-hz = /bits/ 64 <338000000>;
++		};
++
++		opp-385000000 {
++			opp-hz = /bits/ 64 <385000000>;
++		};
++
++		opp-455000000 {
++			opp-hz = /bits/ 64 <455000000>;
++		};
++
++		opp-546000000 {
++			opp-hz = /bits/ 64 <546000000>;
++		};
++	};
++
+ 	firmware {
+ 		acpm_ipc: power-management {
+ 			compatible = "samsung,exynos8895-acpm-ipc";
+@@ -289,8 +313,9 @@ acpm_ipc: power-management {
+ 			shmem = <&apm_sram>;
+ 			/* the firmware can't report rates, start from known ones */
+ 			assigned-clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>,
+-					  <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
+-			assigned-clock-rates = <1469000000>, <1053000000>;
++					  <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>,
++					  <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_G3D>;
++			assigned-clock-rates = <1469000000>, <1053000000>, <260000000>;
+ 		};
+ 	};
+ 
+@@ -1783,6 +1808,19 @@ pcie_wifi0: pcie@116a0000 {
+ 			status = "disabled";
+ 		};
+ 
++		gpu: gpu@13900000 {
++			compatible = "samsung,exynos8895-mali", "arm,mali-bifrost";
++			reg = <0x13900000 0x5000>;
++			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 61 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 59 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "job", "mmu", "gpu";
++			/* clock and voltage are set by the APM firmware */
++			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_G3D>;
++			operating-points-v2 = <&gpu_opp_table>;
++			#cooling-cells = <2>;
++		};
++
+ 		pinctrl_abox: pinctrl@13e60000 {
+ 			compatible = "samsung,exynos8895-pinctrl";
+ 			reg = <0x13e60000 0x1000>;
+@@ -2042,12 +2080,25 @@ gpu-thermal {
+ 			thermal-sensors = <&tmu_gpu 0>;
+ 
+ 			trips {
++				gpu_alert: gpu-alert {
++					temperature = <85000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
+ 				gpu-critical {
+ 					temperature = <115000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+ 				};
+ 			};
++
++			cooling-maps {
++				map0 {
++					trip = <&gpu_alert>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
+ 		};
+ 
+ 		isp-thermal {
