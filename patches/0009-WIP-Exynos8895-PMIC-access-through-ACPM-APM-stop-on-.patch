@@ -1,0 +1,553 @@
+From 7b2d80dd6f9f5ba28249be21b36f73ca38acd162 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Thu, 22 Oct 2026 20:06:11 +0300
+Subject: [PATCH 09/10] WIP: Exynos8895 PMIC access through ACPM, APM stop on
+ restart, watchdog
+
+The APM firmware drives the SPEEDY bus to the PMIC itself for DVFS
+voltage changes. Driving the SPEEDY controller from Linux at the same
+time wedged the bus: hangs at shutdown (hwclock writing the RTC), resets
+that never completed, a boot-time instruction abort. PMIC accesses now
+go through the firmware like on the vendor kernel: a small I2C adapter
+maps register transfers onto ACPM PMIC commands (channel 2), the
+S2MPS17 regulator and RTC drivers sit on it unchanged.
+
+exynos-acpm: stop the APM and power it down before the system reset,
+as the vendor kernel does. rtc-s2mps17: write the whole UPDATE register
+for each request, a stale request bit froze the time. s3c2410_wdt:
+Exynos8895 variant (A53 cluster watchdog).
+
+DT: PMIC under the ACPM node, SPEEDY left to the firmware, watchdog,
+DECON node.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../boot/dts/exynos/exynos8895-dream2lte.dts  |   8 +-
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    |  31 ++++
+ drivers/firmware/samsung/exynos-acpm.c        |  78 +++++++++
+ drivers/i2c/busses/Kconfig                    |  10 ++
+ drivers/i2c/busses/Makefile                   |   1 +
+ drivers/i2c/busses/i2c-exynos-acpm-pmic.c     | 160 ++++++++++++++++++
+ drivers/rtc/rtc-s2mps17.c                     |  21 ++-
+ drivers/watchdog/s3c2410_wdt.c                |  12 ++
+ 8 files changed, 319 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/i2c/busses/i2c-exynos-acpm-pmic.c
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+index 3bed252cf..03b451b06 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -178,6 +178,12 @@ wink-key {
+ 	};
+ };
+ 
++&decon {
++	width-mm = <69>;
++	height-mm = <142>;
++	status = "okay";
++};
++
+ &hsi2c_23 {
+ 	status = "okay";
+ 
+@@ -290,7 +296,7 @@ &usbdrd_phy {
+ 	status = "okay";
+ };
+ 
+-&speedy {
++&acpm_pmic {
+ 	status = "okay";
+ 
+ 	pmic@1 {
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index 7e1edd212..a6aaeef60 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -311,11 +311,21 @@ acpm_ipc: power-management {
+ 			#clock-cells = <1>;
+ 			mboxes = <&ap2apm_mailbox>;
+ 			shmem = <&apm_sram>;
++			samsung,pmu-syscon = <&pmu_system_controller>;
+ 			/* the firmware can't report rates, start from known ones */
+ 			assigned-clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>,
+ 					  <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>,
+ 					  <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_G3D>;
+ 			assigned-clock-rates = <1469000000>, <1053000000>, <260000000>;
++
++			/* the APM owns the SPEEDY bus, PMIC accesses go through it */
++			acpm_pmic: pmic-i2c {
++				compatible = "samsung,exynos8895-acpm-pmic-i2c";
++				samsung,acpm-channel = <2>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++				status = "disabled";
++			};
+ 		};
+ 	};
+ 
+@@ -399,6 +409,16 @@ timer@10040000 {
+ 				     <GIC_SPI 466 IRQ_TYPE_LEVEL_HIGH>;
+ 		};
+ 
++		watchdog@10060000 {
++			compatible = "samsung,exynos8895-wdt";
++			reg = <0x10060000 0x100>;
++			interrupts = <GIC_SPI 454 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&cmu_peris CLK_GOUT_PERIS_WDT_CLUSTER1_PCLK>, <&oscclk>;
++			clock-names = "watchdog", "watchdog_src";
++			samsung,syscon-phandle = <&pmu_system_controller>;
++			timeout-sec = <30>;
++		};
++
+ 		tmu_cpu: tmu@10080000 {
+ 			compatible = "samsung,exynos8895-tmu";
+ 			reg = <0x10080000 0x400>;
+@@ -1808,6 +1828,17 @@ pcie_wifi0: pcie@116a0000 {
+ 			status = "disabled";
+ 		};
+ 
++		decon: display-controller@12860000 {
++			compatible = "samsung,exynos8895-decon";
++			reg = <0x12860000 0x10000>,
++			      <0x128b1000 0x1000>;
++			reg-names = "decon", "idma";
++			interrupts = <GIC_SPI 142 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 143 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 144 IRQ_TYPE_LEVEL_HIGH>;
++			status = "disabled";
++		};
++
+ 		gpu: gpu@13900000 {
+ 			compatible = "samsung,exynos8895-mali", "arm,mali-bifrost";
+ 			reg = <0x13900000 0x5000>;
+diff --git a/drivers/firmware/samsung/exynos-acpm.c b/drivers/firmware/samsung/exynos-acpm.c
+index 3e105ae68..b80fe75be 100644
+--- a/drivers/firmware/samsung/exynos-acpm.c
++++ b/drivers/firmware/samsung/exynos-acpm.c
+@@ -20,6 +20,7 @@
+ #include <linux/ktime.h>
+ #include <linux/mailbox/exynos-message.h>
+ #include <linux/mailbox_client.h>
++#include <linux/mfd/syscon.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/math.h>
+@@ -27,6 +28,8 @@
+ #include <linux/of_address.h>
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
++#include <linux/reboot.h>
++#include <linux/regmap.h>
+ #include <linux/slab.h>
+ #include <linux/types.h>
+ 
+@@ -39,6 +42,11 @@
+ #define ACPM_PROTOCOL_PLUGIN_ID		GENMASK(28, 26)
+ #define ACPM_PROTOCOL_PLUGIN_ATTACH	BIT(25)
+ #define ACPM_PROTOCOL_PLUGIN_DETACH	BIT(24)
++#define ACPM_PROTOCOL_STOP		BIT(22)
++
++/* PMU: APM Cortex-M3 power configuration */
++#define ACPM_PMU_APM_CONFIGURATION	0x8100
++#define ACPM_PMU_APM_LOCAL_PWR_CFG	BIT(0)
+ 
+ #define ACPM_POLL_TIMEOUT_US		(100 * USEC_PER_MSEC)
+ #define ACPM_TX_TIMEOUT_US		500000
+@@ -203,6 +211,8 @@ struct acpm_chan {
+  * @dev:	pointer to the exynos-acpm device.
+  * @handle:	instance of acpm_handle to send to clients.
+  * @num_chans:	number of channels available for this controller.
++ * @pmu:	PMU regmap, to power down the APM on restart.
++ * @ctrl_chan_id: channel for framework commands (plugins, stop).
+  */
+ struct acpm_info {
+ 	struct acpm_shmem __iomem *shmem;
+@@ -212,6 +222,8 @@ struct acpm_info {
+ 	struct device *dev;
+ 	struct acpm_handle handle;
+ 	u32 num_chans;
++	struct regmap *pmu;
++	unsigned int ctrl_chan_id;
+ };
+ 
+ /**
+@@ -220,11 +232,14 @@ struct acpm_info {
+  * @acpm_clk_dev_name:	base name for the ACPM clocks device that we're registering.
+  * @plugin_chan_id:	channel used to attach/detach plugins, if the host has
+  *			to manage them.
++ * @stop_on_restart:	the APM has to be stopped and powered down before a
++ *			system reset, the reset may hang otherwise.
+  */
+ struct acpm_match_data {
+ 	loff_t initdata_base;
+ 	const char *acpm_clk_dev_name;
+ 	int plugin_chan_id;
++	bool stop_on_restart;
+ };
+ 
+ #define client_to_acpm_chan(c) container_of(c, struct acpm_chan, cl)
+@@ -815,6 +830,51 @@ static int acpm_plugins_init(struct acpm_info *acpm, unsigned int chan_id)
+ 	return 0;
+ }
+ 
++/**
++ * acpm_restart() - stop the APM before the system reset.
++ * @data:	sys-off data, cb_data is the driver data.
++ *
++ * Runs with interrupts off and the other CPUs stopped, so the command is
++ * sent and polled for without taking the channel locks.
++ *
++ * Return: NOTIFY_DONE, the reset itself is done by the next handler.
++ */
++static int acpm_restart(struct sys_off_data *data)
++{
++	struct acpm_info *acpm = data->cb_data;
++	struct acpm_chan *achan = &acpm->chans[acpm->ctrl_chan_id];
++	struct exynos_mbox_msg msg = {
++		.chan_id = acpm->ctrl_chan_id,
++		.chan_type = EXYNOS_MBOX_CHAN_TYPE_DOORBELL,
++	};
++	u32 cmd[4] = { ACPM_PROTOCOL_STOP |
++		       FIELD_PREP(ACPM_PROTOCOL_SEQNUM, ACPM_SEQNUM_MAX - 1) };
++	u32 tx_front, rx_rear, val;
++	int ret;
++
++
++	tx_front = readl(achan->tx.front);
++	rx_rear = readl(achan->rx.rear);
++	__iowrite32_copy(achan->tx.base + achan->mlen * tx_front, cmd,
++			 ARRAY_SIZE(cmd));
++	writel((tx_front + 1) % achan->qlen, achan->tx.front);
++
++	if (mbox_send_message(achan->chan, &msg) < 0)
++		return NOTIFY_DONE;
++	mbox_client_txdone(achan->chan, 0);
++
++	ret = readl_poll_timeout_atomic(achan->rx.front, val, val != rx_rear,
++					10, 100 * USEC_PER_MSEC);
++	writel(readl(achan->rx.front), achan->rx.rear);
++	if (ret)
++		pr_emerg("acpm: APM did not acknowledge stop\n");
++
++	regmap_clear_bits(acpm->pmu, ACPM_PMU_APM_CONFIGURATION,
++			  ACPM_PMU_APM_LOCAL_PWR_CFG);
++
++	return NOTIFY_DONE;
++}
++
+ static void acpm_clk_pdev_unregister(void *data)
+ {
+ 	platform_device_unregister(data);
+@@ -889,6 +949,23 @@ static int acpm_probe(struct platform_device *pdev)
+ 
+ 	acpm->handle.ops = &exynos_acpm_driver_ops;
+ 
++	if (match_data->stop_on_restart) {
++		acpm->pmu = syscon_regmap_lookup_by_phandle(dev->of_node,
++							    "samsung,pmu-syscon");
++		if (IS_ERR(acpm->pmu))
++			return dev_err_probe(dev, PTR_ERR(acpm->pmu),
++					     "no PMU syscon\n");
++
++		acpm->ctrl_chan_id = match_data->plugin_chan_id;
++		/* before syscon-reboot, which writes SWRESET */
++		ret = devm_register_sys_off_handler(dev, SYS_OFF_MODE_RESTART,
++						    SYS_OFF_PRIO_FIRMWARE,
++						    acpm_restart, acpm);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to register restart handler\n");
++	}
++
+ 	if (match_data->plugin_chan_id >= 0) {
+ 		ret = acpm_plugins_init(acpm, match_data->plugin_chan_id);
+ 		if (ret)
+@@ -1041,6 +1118,7 @@ static const struct acpm_match_data acpm_exynos8895 = {
+ 	.initdata_base = ACPM_EXYNOS8895_INITDATA_BASE,
+ 	.acpm_clk_dev_name = "exynos8895-acpm-clk",
+ 	.plugin_chan_id = 4,
++	.stop_on_restart = true,
+ };
+ 
+ static const struct of_device_id acpm_match[] = {
+diff --git a/drivers/i2c/busses/Kconfig b/drivers/i2c/busses/Kconfig
+index f357c265e..96edd098c 100644
+--- a/drivers/i2c/busses/Kconfig
++++ b/drivers/i2c/busses/Kconfig
+@@ -679,6 +679,16 @@ config I2C_EXYNOS_SPEEDY
+ 	  Driver for the SPEEDY single-wire bus that connects some Samsung
+ 	  Exynos SoCs (e.g. Exynos8895) to their PMICs.
+ 
++config I2C_EXYNOS_ACPM_PMIC
++	tristate "Exynos PMIC access through ACPM"
++	depends on EXYNOS_ACPM_PROTOCOL
++	help
++	  I2C adapter for PMICs that are accessed through the Exynos ACPM
++	  firmware, as on Exynos8895 where the firmware itself uses the
++	  SPEEDY bus to the PMIC for voltage changes. Register transfers of
++	  the PMIC drivers are sent to the firmware, which performs them;
++	  the host never touches the SPEEDY controller.
++
+ config I2C_EXYNOS5
+ 	tristate "Exynos high-speed I2C driver"
+ 	depends on OF
+diff --git a/drivers/i2c/busses/Makefile b/drivers/i2c/busses/Makefile
+index b442afc02..112778ddb 100644
+--- a/drivers/i2c/busses/Makefile
++++ b/drivers/i2c/busses/Makefile
+@@ -66,6 +66,7 @@ obj-$(CONFIG_I2C_EG20T)		+= i2c-eg20t.o
+ obj-$(CONFIG_I2C_EMEV2)		+= i2c-emev2.o
+ obj-$(CONFIG_I2C_EXYNOS5)	+= i2c-exynos5.o
+ obj-$(CONFIG_I2C_EXYNOS_SPEEDY)	+= i2c-exynos-speedy.o
++obj-$(CONFIG_I2C_EXYNOS_ACPM_PMIC)	+= i2c-exynos-acpm-pmic.o
+ obj-$(CONFIG_I2C_GPIO)		+= i2c-gpio.o
+ obj-$(CONFIG_I2C_HIGHLANDER)	+= i2c-highlander.o
+ obj-$(CONFIG_I2C_HISI)		+= i2c-hisi.o
+diff --git a/drivers/i2c/busses/i2c-exynos-acpm-pmic.c b/drivers/i2c/busses/i2c-exynos-acpm-pmic.c
+new file mode 100644
+index 000000000..0d3e4daa4
+--- /dev/null
++++ b/drivers/i2c/busses/i2c-exynos-acpm-pmic.c
+@@ -0,0 +1,160 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * PMIC access through the Exynos ACPM firmware, as an I2C adapter
++ *
++ * On Exynos8895 the PMIC sits on the SPEEDY bus, which the APM firmware
++ * also drives itself to change the CPU and GPU voltages. The host must not
++ * touch the SPEEDY controller then; the firmware performs the transfers on
++ * its behalf. This adapter maps I2C register transfers (one register byte
++ * followed by data) onto ACPM PMIC commands, the client address selects the
++ * PMIC block (the "type" of the command).
++ */
++
++#include <linux/err.h>
++#include <linux/firmware/samsung/exynos-acpm-protocol.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#define ACPM_PMIC_BULK_MAX	8
++
++struct acpm_pmic_i2c {
++	struct i2c_adapter adap;
++	struct acpm_handle *handle;
++	u32 chan_id;
++};
++
++static int acpm_pmic_i2c_read(struct acpm_pmic_i2c *bus, u8 type, u8 reg,
++			      u8 *buf, u16 len)
++{
++	const struct acpm_pmic_ops *ops = &bus->handle->ops->pmic;
++	int ret;
++	u8 n;
++
++	while (len) {
++		n = min_t(u16, len, ACPM_PMIC_BULK_MAX);
++		if (n == 1)
++			ret = ops->read_reg(bus->handle, bus->chan_id, type,
++					    reg, 0, buf);
++		else
++			ret = ops->bulk_read(bus->handle, bus->chan_id, type,
++					     reg, 0, n, buf);
++		if (ret)
++			return ret;
++
++		reg += n;
++		buf += n;
++		len -= n;
++	}
++
++	return 0;
++}
++
++static int acpm_pmic_i2c_write(struct acpm_pmic_i2c *bus, u8 type, u8 reg,
++			       const u8 *buf, u16 len)
++{
++	const struct acpm_pmic_ops *ops = &bus->handle->ops->pmic;
++	int ret;
++	u8 n;
++
++	while (len) {
++		n = min_t(u16, len, ACPM_PMIC_BULK_MAX);
++		if (n == 1)
++			ret = ops->write_reg(bus->handle, bus->chan_id, type,
++					     reg, 0, *buf);
++		else
++			ret = ops->bulk_write(bus->handle, bus->chan_id, type,
++					      reg, 0, n, buf);
++		if (ret)
++			return ret;
++
++		reg += n;
++		buf += n;
++		len -= n;
++	}
++
++	return 0;
++}
++
++static int acpm_pmic_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
++			      int num)
++{
++	struct acpm_pmic_i2c *bus = i2c_get_adapdata(adap);
++	struct i2c_msg *m = &msgs[0];
++	int ret;
++
++	/* register address, then data to write or a read of the data */
++	if (m->flags & I2C_M_RD || m->len < 1 || m->addr > 0xf)
++		return -EOPNOTSUPP;
++
++	if (num == 1) {
++		ret = acpm_pmic_i2c_write(bus, m->addr, m->buf[0], &m->buf[1],
++					  m->len - 1);
++	} else if (num == 2 && m->len == 1 && msgs[1].flags & I2C_M_RD &&
++		   msgs[1].addr == m->addr) {
++		ret = acpm_pmic_i2c_read(bus, m->addr, m->buf[0], msgs[1].buf,
++					 msgs[1].len);
++	} else {
++		return -EOPNOTSUPP;
++	}
++
++	return ret ? ret : num;
++}
++
++static u32 acpm_pmic_i2c_func(struct i2c_adapter *adap)
++{
++	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_BYTE_DATA |
++	       I2C_FUNC_SMBUS_I2C_BLOCK;
++}
++
++static const struct i2c_algorithm acpm_pmic_i2c_algo = {
++	.xfer = acpm_pmic_i2c_xfer,
++	.functionality = acpm_pmic_i2c_func,
++};
++
++static int acpm_pmic_i2c_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct acpm_pmic_i2c *bus;
++
++	bus = devm_kzalloc(dev, sizeof(*bus), GFP_KERNEL);
++	if (!bus)
++		return -ENOMEM;
++
++	bus->handle = devm_acpm_get_by_node(dev, dev->parent->of_node);
++	if (IS_ERR(bus->handle))
++		return dev_err_probe(dev, PTR_ERR(bus->handle),
++				     "failed to get ACPM handle\n");
++
++	if (of_property_read_u32(dev->of_node, "samsung,acpm-channel",
++				 &bus->chan_id))
++		return dev_err_probe(dev, -EINVAL, "no ACPM channel\n");
++
++	bus->adap.owner = THIS_MODULE;
++	bus->adap.algo = &acpm_pmic_i2c_algo;
++	bus->adap.dev.parent = dev;
++	bus->adap.dev.of_node = dev->of_node;
++	strscpy(bus->adap.name, "ACPM PMIC", sizeof(bus->adap.name));
++	i2c_set_adapdata(&bus->adap, bus);
++
++	return devm_i2c_add_adapter(dev, &bus->adap);
++}
++
++static const struct of_device_id acpm_pmic_i2c_of_match[] = {
++	{ .compatible = "samsung,exynos8895-acpm-pmic-i2c" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, acpm_pmic_i2c_of_match);
++
++static struct platform_driver acpm_pmic_i2c_driver = {
++	.probe = acpm_pmic_i2c_probe,
++	.driver = {
++		.name = "exynos-acpm-pmic-i2c",
++		.of_match_table = acpm_pmic_i2c_of_match,
++	},
++};
++module_platform_driver(acpm_pmic_i2c_driver);
++
++MODULE_DESCRIPTION("PMIC access through Exynos ACPM as an I2C adapter");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/rtc/rtc-s2mps17.c b/drivers/rtc/rtc-s2mps17.c
+index 6e568c554..466ed241f 100644
+--- a/drivers/rtc/rtc-s2mps17.c
++++ b/drivers/rtc/rtc-s2mps17.c
+@@ -24,6 +24,12 @@
+ /* latch the counters for reading / commit written counters */
+ #define S2MPS17_RTC_UPDATE_RUDR		BIT(0)
+ #define S2MPS17_RTC_UPDATE_WUDR		BIT(1)
++#define S2MPS17_RTC_UPDATE_FREEZE	BIT(2)
++#define S2MPS17_RTC_UPDATE_AUDR		BIT(4)
++#define S2MPS17_RTC_UPDATE_REQS		(S2MPS17_RTC_UPDATE_RUDR | \
++					 S2MPS17_RTC_UPDATE_WUDR | \
++					 S2MPS17_RTC_UPDATE_FREEZE | \
++					 S2MPS17_RTC_UPDATE_AUDR)
+ #define S2MPS17_RTC_HOUR_PM		BIT(6)
+ 
+ enum {
+@@ -40,13 +46,20 @@ enum {
+ struct s2mps17_rtc {
+ 	struct regmap *regmap;
+ 	struct rtc_device *rtc;
++	/* UPDATE register without the request bits */
++	unsigned int update_base;
+ };
+ 
+ static int s2mps17_rtc_update(struct s2mps17_rtc *info, unsigned int bit)
+ {
+ 	int ret;
+ 
+-	ret = regmap_update_bits(info->regmap, S2MPS17_RTC_REG_UPDATE, bit, bit);
++	/*
++	 * Write the whole register: a request bit that still reads as set
++	 * from the previous request would not trigger a new transfer.
++	 */
++	ret = regmap_write(info->regmap, S2MPS17_RTC_REG_UPDATE,
++			   info->update_base | bit);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -147,6 +160,12 @@ static int s2mps17_rtc_probe(struct i2c_client *client)
+ 		return dev_err_probe(dev, -ENODEV,
+ 				     "unsupported counter mode %#x\n", ctrl);
+ 
++	ret = regmap_read(info->regmap, S2MPS17_RTC_REG_UPDATE,
++			  &info->update_base);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read update\n");
++	info->update_base &= ~S2MPS17_RTC_UPDATE_REQS;
++
+ 	dev_set_drvdata(dev, info);
+ 
+ 	info->rtc = devm_rtc_allocate_device(dev);
+diff --git a/drivers/watchdog/s3c2410_wdt.c b/drivers/watchdog/s3c2410_wdt.c
+index e31f93db0..7a51bf639 100644
+--- a/drivers/watchdog/s3c2410_wdt.c
++++ b/drivers/watchdog/s3c2410_wdt.c
+@@ -242,6 +242,16 @@ static const struct s3c2410_wdt_variant drv_data_exynos7 = {
+ 		  QUIRK_HAS_PMU_RST_STAT | QUIRK_HAS_PMU_AUTO_DISABLE,
+ };
+ 
++static const struct s3c2410_wdt_variant drv_data_exynos8895 = {
++	.disable_reg = EXYNOS5_WDT_DISABLE_REG_OFFSET,
++	.mask_reset_reg = EXYNOS5_WDT_MASK_RESET_REG_OFFSET,
++	.mask_bit = 24,
++	.rst_stat_reg = EXYNOS5_RST_STAT_REG_OFFSET,
++	.rst_stat_bit = 24,	/* A53 WDTRESET */
++	.quirks = QUIRK_HAS_WTCLRINT_REG | QUIRK_HAS_PMU_MASK_RESET | \
++		  QUIRK_HAS_PMU_RST_STAT | QUIRK_HAS_PMU_AUTO_DISABLE,
++};
++
+ static const struct s3c2410_wdt_variant drv_data_exynos850_cl0 = {
+ 	.mask_reset_reg = EXYNOS850_CLUSTER0_NONCPU_INT_EN,
+ 	.mask_bit = 2,
+@@ -381,6 +391,8 @@ static const struct of_device_id s3c2410_wdt_match[] = {
+ 	  .data = &drv_data_exynos5420 },
+ 	{ .compatible = "samsung,exynos7-wdt",
+ 	  .data = &drv_data_exynos7 },
++	{ .compatible = "samsung,exynos8895-wdt",
++	  .data = &drv_data_exynos8895 },
+ 	{ .compatible = "samsung,exynos850-wdt",
+ 	  .data = &drv_data_exynos850_cl0 },
+ 	{ .compatible = "samsung,exynos990-wdt",

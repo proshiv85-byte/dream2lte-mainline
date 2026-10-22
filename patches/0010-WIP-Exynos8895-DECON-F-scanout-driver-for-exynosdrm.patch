@@ -1,0 +1,555 @@
+From bb5b2aef292c0d62c6d21589857c1f6c1f447220 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Thu, 22 Oct 2026 20:06:11 +0300
+Subject: [PATCH 10/10] WIP: Exynos8895 DECON-F scanout driver for exynosdrm
+
+Takes over the display path the bootloader sets up (DECON-F in MIPI
+command mode with TE trigger, DSC, DSI, S6E3HA6 panel) and scans out
+DRM framebuffers through the IDMA channel of the default window, latched
+by the DECON shadow update at the next frame start. Named "exynos", so
+Mesa's kmsro pairs it with panfrost for zero-copy scanout.
+
+exynos_drm_gem: accept non-contiguous dma-buf imports (compositors
+import every client buffer to check it), refuse them at framebuffer
+creation instead, together with buffers above 4 GiB that the display
+DMA can't reach. The DECON gets a 64-bit streaming mask so imports are
+never bounced.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/gpu/drm/exynos/Kconfig                |   9 +
+ drivers/gpu/drm/exynos/Makefile               |   1 +
+ drivers/gpu/drm/exynos/exynos8895_drm_decon.c | 396 ++++++++++++++++++
+ drivers/gpu/drm/exynos/exynos_drm_drv.c       |   3 +
+ drivers/gpu/drm/exynos/exynos_drm_drv.h       |   1 +
+ drivers/gpu/drm/exynos/exynos_drm_fb.c        |  13 +-
+ drivers/gpu/drm/exynos/exynos_drm_gem.c       |  18 +-
+ 7 files changed, 434 insertions(+), 7 deletions(-)
+ create mode 100644 drivers/gpu/drm/exynos/exynos8895_drm_decon.c
+
+diff --git a/drivers/gpu/drm/exynos/Kconfig b/drivers/gpu/drm/exynos/Kconfig
+index a59131ae1..7ea3a387c 100644
+--- a/drivers/gpu/drm/exynos/Kconfig
++++ b/drivers/gpu/drm/exynos/Kconfig
+@@ -30,6 +30,15 @@ config DRM_EXYNOS5433_DECON
+ 	help
+ 	  Choose this option if you want to use Exynos5433 DECON for DRM.
+ 
++config DRM_EXYNOS8895_DECON
++	bool "DECON-F on Exynos8895"
++	select DRM_KMS_HELPER
++	help
++	  Choose this option if you want to use the Exynos8895 DECON-F for DRM.
++	  It takes over the display path set up by the bootloader (DECON in
++	  command mode, DSC, DSI host and panel) and scans out from DRM
++	  framebuffers, which are flipped at the next frame start.
++
+ config DRM_EXYNOS7_DECON
+ 	bool "DECON on Exynos7"
+ 	depends on !FB_S3C
+diff --git a/drivers/gpu/drm/exynos/Makefile b/drivers/gpu/drm/exynos/Makefile
+index 2fd2f3ee4..6cefad036 100644
+--- a/drivers/gpu/drm/exynos/Makefile
++++ b/drivers/gpu/drm/exynos/Makefile
+@@ -9,6 +9,7 @@ exynosdrm-y := exynos_drm_drv.o exynos_drm_crtc.o exynos_drm_fb.o \
+ exynosdrm-$(CONFIG_DRM_FBDEV_EMULATION) += exynos_drm_fbdev.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS_FIMD)	+= exynos_drm_fimd.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS5433_DECON)	+= exynos5433_drm_decon.o
++exynosdrm-$(CONFIG_DRM_EXYNOS8895_DECON)	+= exynos8895_drm_decon.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS7_DECON)	+= exynos7_drm_decon.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS_DPI)	+= exynos_drm_dpi.o
+ exynosdrm-$(CONFIG_DRM_EXYNOS_DSI)	+= exynos_drm_dsi.o
+diff --git a/drivers/gpu/drm/exynos/exynos8895_drm_decon.c b/drivers/gpu/drm/exynos/exynos8895_drm_decon.c
+new file mode 100644
+index 000000000..b986d4ff0
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos8895_drm_decon.c
+@@ -0,0 +1,396 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Exynos8895 DECON-F driver, scanout only
++ *
++ * The bootloader brings up the whole display path: DECON-F in MIPI command
++ * mode with hardware trigger from the panel's TE line, DSC, the DSI host and
++ * the panel. This driver keeps that configuration and only feeds the IDMA
++ * channel behind the default window with new buffers, latched through the
++ * DECON shadow registers at the next frame start. Panel control and a full
++ * power-up sequence are left for later.
++ */
++
++#include <linux/aperture.h>
++#include <linux/component.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_fourcc.h>
++#include <drm/drm_framebuffer.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_simple_kms_helper.h>
++#include <drm/drm_vblank.h>
++
++#include "exynos_drm_crtc.h"
++#include "exynos_drm_drv.h"
++#include "exynos_drm_fb.h"
++#include "exynos_drm_plane.h"
++
++/* DECON registers */
++#define DECON_INTERRUPT_PENDING		0x004c
++#define DPU_FRAME_DONE_INT_PEND		BIT(13)
++#define DPU_FRAME_START_INT_PEND	BIT(12)
++#define DPU_UNDER_FLOW_INT_PEND		BIT(8)
++#define DPU_EXTRA_INT_PEND		BIT(4)
++#define DECON_EXTRA_INTERRUPT_PENDING	0x0050
++#define DECON_SHADOW_REG_UPDATE_REQ	0x0060
++#define SHADOW_REG_UPDATE_REQ_WIN(w)	BIT(w)
++#define DECON_BLENDER_BG_IMAGE_SIZE_0	0x0200
++#define DECON_DATA_PATH_CONTROL_0	0x0214
++#define WIN_EN_F(w)			BIT(4 * (w))
++
++/* IDMA registers */
++#define IDMA_IN_CON			0x0008
++#define IDMA_IMG_FORMAT_MASK		GENMASK(15, 11)
++#define IDMA_IMG_FORMAT(f)		((f) << 11)
++#define IDMA_FMT_ARGB8888		0
++#define IDMA_FMT_ABGR8888		1
++#define IDMA_FMT_XRGB8888		4
++#define IDMA_FMT_XBGR8888		5
++#define IDMA_SRC_SIZE			0x0010
++#define IDMA_SRC_OFFSET			0x0014
++#define IDMA_IMG_SIZE			0x0018
++#define IDMA_IN_BASE_ADDR_Y		0x0040
++#define IDMA_SIZE(w, h)			(((h) << 16) | (w))
++
++/* the bootloader puts its framebuffer on window 5, fed by IDMA G0 */
++#define DECON_WIN			5
++#define DECON_IRQS			3
++
++struct decon8895_context {
++	struct device *dev;
++	struct drm_device *drm;
++	void *dma_priv;
++	void __iomem *regs;
++	void __iomem *idma;
++	struct exynos_drm_crtc *crtc;
++	struct exynos_drm_plane plane;
++	struct exynos_drm_plane_config plane_config;
++	struct drm_encoder encoder;
++	struct drm_connector connector;
++	int irqs[DECON_IRQS];
++	/* bootloader framebuffer, scanned out while the CRTC is off */
++	u32 boot_fb;
++	u32 boot_src_size;
++	u32 width;
++	u32 height;
++};
++
++static const u32 decon8895_formats[] = {
++	DRM_FORMAT_XRGB8888,
++	DRM_FORMAT_ARGB8888,
++	DRM_FORMAT_XBGR8888,
++	DRM_FORMAT_ABGR8888,
++};
++
++static u32 decon8895_idma_format(u32 format)
++{
++	switch (format) {
++	case DRM_FORMAT_ARGB8888:
++		return IDMA_FMT_ARGB8888;
++	case DRM_FORMAT_ABGR8888:
++		return IDMA_FMT_ABGR8888;
++	case DRM_FORMAT_XBGR8888:
++		return IDMA_FMT_XBGR8888;
++	case DRM_FORMAT_XRGB8888:
++	default:
++		return IDMA_FMT_XRGB8888;
++	}
++}
++
++static void decon8895_request_update(struct decon8895_context *ctx)
++{
++	u32 val = readl(ctx->regs + DECON_SHADOW_REG_UPDATE_REQ);
++
++	writel(val | SHADOW_REG_UPDATE_REQ_WIN(DECON_WIN),
++	       ctx->regs + DECON_SHADOW_REG_UPDATE_REQ);
++}
++
++static void decon8895_scanout(struct decon8895_context *ctx, u32 addr,
++			      u32 src_size, u32 offset, u32 img_size, u32 fmt)
++{
++	u32 val;
++
++	val = readl(ctx->idma + IDMA_IN_CON) & ~IDMA_IMG_FORMAT_MASK;
++	writel(val | IDMA_IMG_FORMAT(fmt), ctx->idma + IDMA_IN_CON);
++	writel(src_size, ctx->idma + IDMA_SRC_SIZE);
++	writel(offset, ctx->idma + IDMA_SRC_OFFSET);
++	writel(img_size, ctx->idma + IDMA_IMG_SIZE);
++	writel(addr, ctx->idma + IDMA_IN_BASE_ADDR_Y);
++}
++
++static int decon8895_enable_vblank(struct exynos_drm_crtc *crtc)
++{
++	struct decon8895_context *ctx = crtc->ctx;
++	int i;
++
++	for (i = 0; i < DECON_IRQS; i++)
++		enable_irq(ctx->irqs[i]);
++
++	return 0;
++}
++
++static void decon8895_disable_vblank(struct exynos_drm_crtc *crtc)
++{
++	struct decon8895_context *ctx = crtc->ctx;
++	int i;
++
++	for (i = 0; i < DECON_IRQS; i++)
++		disable_irq_nosync(ctx->irqs[i]);
++}
++
++static void decon8895_update_plane(struct exynos_drm_crtc *crtc,
++				   struct exynos_drm_plane *plane)
++{
++	struct exynos_drm_plane_state *state =
++		to_exynos_plane_state(plane->base.state);
++	struct decon8895_context *ctx = crtc->ctx;
++	struct drm_framebuffer *fb = state->base.fb;
++	u32 stride = fb->pitches[0] / fb->format->cpp[0];
++
++	decon8895_scanout(ctx, exynos_drm_fb_dma_addr(fb, 0),
++			  IDMA_SIZE(stride, fb->height),
++			  IDMA_SIZE(state->src.x, state->src.y),
++			  IDMA_SIZE(state->src.w, state->src.h),
++			  decon8895_idma_format(fb->format->format));
++}
++
++static void decon8895_disable_plane(struct exynos_drm_crtc *crtc,
++				    struct exynos_drm_plane *plane)
++{
++	struct decon8895_context *ctx = crtc->ctx;
++
++	/* never leave the IDMA reading a buffer that may be freed */
++	decon8895_scanout(ctx, ctx->boot_fb, ctx->boot_src_size, 0,
++			  IDMA_SIZE(ctx->width, ctx->height), IDMA_FMT_ARGB8888);
++	decon8895_request_update(ctx);
++}
++
++static void decon8895_atomic_flush(struct exynos_drm_crtc *crtc)
++{
++	struct decon8895_context *ctx = crtc->ctx;
++
++	decon8895_request_update(ctx);
++	exynos_crtc_handle_event(crtc);
++}
++
++static const struct exynos_drm_crtc_ops decon8895_crtc_ops = {
++	.enable_vblank = decon8895_enable_vblank,
++	.disable_vblank = decon8895_disable_vblank,
++	.update_plane = decon8895_update_plane,
++	.disable_plane = decon8895_disable_plane,
++	.atomic_flush = decon8895_atomic_flush,
++};
++
++static irqreturn_t decon8895_irq_handler(int irq, void *data)
++{
++	struct decon8895_context *ctx = data;
++	u32 pend, ext;
++
++	pend = readl(ctx->regs + DECON_INTERRUPT_PENDING);
++	ext = readl(ctx->regs + DECON_EXTRA_INTERRUPT_PENDING);
++	writel(pend, ctx->regs + DECON_INTERRUPT_PENDING);
++	writel(ext, ctx->regs + DECON_EXTRA_INTERRUPT_PENDING);
++
++	/*
++	 * Shadow registers are latched at frame start. Count a vblank only
++	 * once a pending update has been taken, so that flip events are not
++	 * signalled before the new buffer is being scanned out.
++	 */
++	if ((pend & DPU_FRAME_START_INT_PEND) && ctx->crtc &&
++	    !(readl(ctx->regs + DECON_SHADOW_REG_UPDATE_REQ) &
++	      SHADOW_REG_UPDATE_REQ_WIN(DECON_WIN)))
++		drm_crtc_handle_vblank(&ctx->crtc->base);
++
++	return pend || ext ? IRQ_HANDLED : IRQ_NONE;
++}
++
++static int decon8895_connector_get_modes(struct drm_connector *connector)
++{
++	struct decon8895_context *ctx =
++		container_of(connector, struct decon8895_context, connector);
++	struct drm_display_mode *mode;
++
++	/* command mode panel, refreshed from its TE signal at 60 Hz */
++	mode = drm_cvt_mode(connector->dev, ctx->width, ctx->height, 60,
++			    false, false, false);
++	if (!mode)
++		return 0;
++
++	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++	drm_mode_probed_add(connector, mode);
++
++	return 1;
++}
++
++static const struct drm_connector_helper_funcs decon8895_connector_helper_funcs = {
++	.get_modes = decon8895_connector_get_modes,
++};
++
++static const struct drm_connector_funcs decon8895_connector_funcs = {
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.destroy = drm_connector_cleanup,
++	.reset = drm_atomic_helper_connector_reset,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++};
++
++static int decon8895_bind(struct device *dev, struct device *master, void *data)
++{
++	struct decon8895_context *ctx = dev_get_drvdata(dev);
++	struct drm_device *drm = data;
++	struct device_node *np = dev->of_node;
++	u32 width_mm = 0, height_mm = 0;
++	int ret;
++
++	ctx->drm = drm;
++
++	ctx->plane_config.zpos = 0;
++	ctx->plane_config.type = DRM_PLANE_TYPE_PRIMARY;
++	ctx->plane_config.pixel_formats = decon8895_formats;
++	ctx->plane_config.num_pixel_formats = ARRAY_SIZE(decon8895_formats);
++	ret = exynos_plane_init(drm, &ctx->plane, 0, &ctx->plane_config);
++	if (ret)
++		return ret;
++
++	ctx->crtc = exynos_drm_crtc_create(drm, &ctx->plane.base,
++					   EXYNOS_DISPLAY_TYPE_LCD,
++					   &decon8895_crtc_ops, ctx);
++	if (IS_ERR(ctx->crtc))
++		return PTR_ERR(ctx->crtc);
++
++	ret = drm_simple_encoder_init(drm, &ctx->encoder, DRM_MODE_ENCODER_DSI);
++	if (ret)
++		return ret;
++
++	ret = exynos_drm_set_possible_crtcs(&ctx->encoder,
++					    EXYNOS_DISPLAY_TYPE_LCD);
++	if (ret)
++		return ret;
++
++	of_property_read_u32(np, "width-mm", &width_mm);
++	of_property_read_u32(np, "height-mm", &height_mm);
++	ctx->connector.display_info.width_mm = width_mm;
++	ctx->connector.display_info.height_mm = height_mm;
++	ret = drm_connector_init(drm, &ctx->connector,
++				 &decon8895_connector_funcs,
++				 DRM_MODE_CONNECTOR_DSI);
++	if (ret)
++		return ret;
++
++	drm_connector_helper_add(&ctx->connector,
++				 &decon8895_connector_helper_funcs);
++	ret = drm_connector_attach_encoder(&ctx->connector, &ctx->encoder);
++	if (ret)
++		return ret;
++
++	return exynos_drm_register_dma(drm, dev, &ctx->dma_priv);
++}
++
++static void decon8895_unbind(struct device *dev, struct device *master,
++			     void *data)
++{
++	struct decon8895_context *ctx = dev_get_drvdata(dev);
++
++	decon8895_disable_plane(ctx->crtc, &ctx->plane);
++	exynos_drm_unregister_dma(ctx->drm, dev, &ctx->dma_priv);
++}
++
++static const struct component_ops decon8895_component_ops = {
++	.bind = decon8895_bind,
++	.unbind = decon8895_unbind,
++};
++
++static int decon8895_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct decon8895_context *ctx;
++	u32 bg, src;
++	int i, ret;
++
++	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++
++	ctx->dev = dev;
++
++	/*
++	 * Imported buffers are mapped without bouncing, those the IDMA can't
++	 * reach are refused when a framebuffer is created; scanout buffers
++	 * are allocated below 4 GiB.
++	 */
++	ret = dma_set_mask(dev, DMA_BIT_MASK(64));
++	if (!ret)
++		ret = dma_set_coherent_mask(dev, DMA_BIT_MASK(32));
++	if (ret)
++		return ret;
++
++	ctx->regs = devm_platform_ioremap_resource_byname(pdev, "decon");
++	if (IS_ERR(ctx->regs))
++		return PTR_ERR(ctx->regs);
++
++	ctx->idma = devm_platform_ioremap_resource_byname(pdev, "idma");
++	if (IS_ERR(ctx->idma))
++		return PTR_ERR(ctx->idma);
++
++	if (!(readl(ctx->regs + DECON_DATA_PATH_CONTROL_0) & WIN_EN_F(DECON_WIN)))
++		return dev_err_probe(dev, -ENODEV,
++				     "display not set up by the bootloader\n");
++
++	bg = readl(ctx->regs + DECON_BLENDER_BG_IMAGE_SIZE_0);
++	ctx->width = bg & 0x3fff;
++	ctx->height = (bg >> 16) & 0x3fff;
++	ctx->boot_fb = readl(ctx->idma + IDMA_IN_BASE_ADDR_Y);
++	ctx->boot_src_size = readl(ctx->idma + IDMA_SRC_SIZE);
++	src = ctx->boot_src_size & 0xffff;
++	dev_info(dev, "taking over %ux%u, bootloader framebuffer at %#x\n",
++		 ctx->width, ctx->height, ctx->boot_fb);
++
++	/* the generic framebuffer driver scans out the same buffer */
++	ret = aperture_remove_conflicting_devices(ctx->boot_fb,
++						  (resource_size_t)src * 4 * ctx->height,
++						  "exynos8895-decon");
++	if (ret)
++		return ret;
++
++	for (i = 0; i < DECON_IRQS; i++) {
++		ctx->irqs[i] = platform_get_irq(pdev, i);
++		if (ctx->irqs[i] < 0)
++			return ctx->irqs[i];
++
++		ret = devm_request_irq(dev, ctx->irqs[i], decon8895_irq_handler,
++				       IRQF_NO_AUTOEN, "exynos8895-decon", ctx);
++		if (ret)
++			return ret;
++	}
++
++	platform_set_drvdata(pdev, ctx);
++
++	return component_add(dev, &decon8895_component_ops);
++}
++
++static void decon8895_remove(struct platform_device *pdev)
++{
++	component_del(&pdev->dev, &decon8895_component_ops);
++}
++
++static const struct of_device_id decon8895_of_match[] = {
++	{ .compatible = "samsung,exynos8895-decon" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, decon8895_of_match);
++
++struct platform_driver exynos8895_decon_driver = {
++	.probe = decon8895_probe,
++	.remove = decon8895_remove,
++	.driver = {
++		.name = "exynos8895-decon",
++		.of_match_table = decon8895_of_match,
++	},
++};
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_drv.c b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+index 9ee300868..5522ffa1d 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_drv.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+@@ -167,6 +167,9 @@ static struct exynos_drm_driver_info exynos_drm_drivers[] = {
+ 	}, {
+ 		DRV_PTR(decon_driver, CONFIG_DRM_EXYNOS7_DECON),
+ 		DRM_COMPONENT_DRIVER
++	}, {
++		DRV_PTR(exynos8895_decon_driver, CONFIG_DRM_EXYNOS8895_DECON),
++		DRM_COMPONENT_DRIVER
+ 	}, {
+ 		DRV_PTR(mixer_driver, CONFIG_DRM_EXYNOS_MIXER),
+ 		DRM_COMPONENT_DRIVER
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_drv.h b/drivers/gpu/drm/exynos/exynos_drm_drv.h
+index b126cd129..b1a4bc669 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_drv.h
++++ b/drivers/gpu/drm/exynos/exynos_drm_drv.h
+@@ -248,6 +248,7 @@ static inline int exynos_drm_check_fimc_device(struct device *dev)
+ 
+ extern struct platform_driver fimd_driver;
+ extern struct platform_driver exynos5433_decon_driver;
++extern struct platform_driver exynos8895_decon_driver;
+ extern struct platform_driver decon_driver;
+ extern struct platform_driver dp_driver;
+ extern struct platform_driver dsi_driver;
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_fb.c b/drivers/gpu/drm/exynos/exynos_drm_fb.c
+index 4cff2b2b6..e233c653d 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_fb.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_fb.c
+@@ -8,6 +8,8 @@
+  *	Seung-Woo Kim <sw0312.kim@samsung.com>
+  */
+ 
++#include <linux/dma-mapping.h>
++
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+@@ -43,8 +45,15 @@ static int check_fb_gem_memory_type(struct drm_device *drm_dev,
+ 	 * supported without IOMMU.
+ 	 */
+ 	if (IS_NONCONTIG_BUFFER(flags)) {
+-		DRM_DEV_ERROR(drm_dev->dev,
+-			      "Non-contiguous GEM memory is not supported.\n");
++		DRM_DEV_DEBUG_KMS(drm_dev->dev,
++				  "Non-contiguous GEM memory is not supported.\n");
++		return -EINVAL;
++	}
++
++	/* the display DMA only takes 32-bit addresses */
++	if (exynos_gem->dma_addr + exynos_gem->base.size - 1 > DMA_BIT_MASK(32)) {
++		DRM_DEV_DEBUG_KMS(drm_dev->dev,
++				  "GEM memory above 4 GiB is not supported.\n");
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_gem.c b/drivers/gpu/drm/exynos/exynos_drm_gem.c
+index 0208c9259..b4e2d322a 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_gem.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_gem.c
+@@ -427,17 +427,25 @@ exynos_drm_gem_prime_import_sg_table(struct drm_device *dev,
+ 				     struct sg_table *sgt)
+ {
+ 	struct exynos_drm_gem *exynos_gem;
++	bool contig;
+ 
+-	/* check if the entries in the sg_table are contiguous */
+-	if (drm_prime_get_contiguous_size(sgt) < attach->dmabuf->size) {
+-		DRM_ERROR("buffer chunks must be mapped contiguously");
+-		return ERR_PTR(-EINVAL);
+-	}
++	/*
++	 * A buffer the display can't scan out may still be imported, e.g. by
++	 * a compositor checking client buffers; creating a framebuffer from it
++	 * is refused instead.
++	 */
++	contig = drm_prime_get_contiguous_size(sgt) >= attach->dmabuf->size;
+ 
+ 	exynos_gem = exynos_drm_gem_init(dev, attach->dmabuf->size);
+ 	if (IS_ERR(exynos_gem))
+ 		return ERR_CAST(exynos_gem);
+ 
++	if (!contig) {
++		exynos_gem->flags |= EXYNOS_BO_NONCONTIG;
++		exynos_gem->sgt = sgt;
++		return &exynos_gem->base;
++	}
++
+ 	/*
+ 	 * Buffer has been mapped as contiguous into DMA address space,
+ 	 * but if there is IOMMU, it can be either CONTIG or NONCONTIG.

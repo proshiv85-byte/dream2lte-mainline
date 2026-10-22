@@ -33,8 +33,12 @@ fi
 
 mkdir -p ~/.local/state
 # Output name for ~/.config/sway/config: the 4.4 kernel has no DRM device and
-# sway uses the fbdev backend, mainline has simpledrm (connector "Unknown-1").
-if [ -e /dev/dri/card0 ]; then out=Unknown-1; else out=FBDEV-fb0; fi
+# sway uses the fbdev backend; on mainline it is the DRM connector name
+# ("DSI-1" with the DECON driver, "Unknown-1" with simpledrm).
+out=FBDEV-fb0
+for c in /sys/class/drm/card*-*; do
+	[ -e "$c" ] && { out=${c##*/card[0-9]-}; break; }
+done
 echo "set \$out $out" > ~/.config/sway/output.conf
 log=~/.local/state/sway.log
 # keep a core file (~/core, kernel.core_pattern=core) if the compositor crashes
