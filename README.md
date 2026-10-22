@@ -15,11 +15,12 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 
 | Hardware | State |
 |---|---|
-| CPUs (8 cores), RAM (3.5 GB usable) | works |
+| CPUs (8 cores), RAM (3.5 GB usable) | works, idle cores are powered down |
 | CPU frequency scaling | works: A53 455–1690 MHz, Mongoose 741–2314 MHz, via the APM firmware (needs the DVFS plugin, see below) |
 | GPU (Mali-G71 MP20) | works: `panfrost` + Mesa (OpenGL ES / OpenGL), DVFS 260–546 MHz, sway renders on it |
 | WiFi (BCM4361) | works: scan and connect, 2.4 + 5 GHz, via `brcmfmac` (needs the Samsung firmware, see below) |
 | Thermal | works: CPU, GPU and ISP sensors, CPUs throttle at 80 °C (big) / 90 °C (little), shutdown at 115 °C |
+| microSD | reads work at reduced speed (~3.3 MB/s, card clock capped at 7 MHz for now) |
 | Display | works: DRM driver (`exynosdrm`), GPU buffers flipped straight to the panel at 60 Hz; no brightness or screen off yet |
 | Touchscreen (STM FTS8) | works |
 | Buttons | works |
@@ -51,6 +52,11 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
   path set up by the bootloader (command mode panel, DSC, DSI) and only
   flips buffers; with the name `exynos`, Mesa scans out panfrost-rendered
   buffers directly
+- CPU idle: PSCI core power-down; `exynos8895-cpupm` sets the core's PMU
+  power configuration around it (and disarms the cluster power-down the
+  bootloader leaves enabled, which loses the L2 contents)
+- microSD: card supplies (S2MPS17 LDO2 + switched VDD) and slot; an mmc
+  block fix for requests stuck in single-block mode after a retry
 - watchdog: Exynos8895 variant of `s3c2410_wdt`; the APM firmware is
   stopped before a reset like on the vendor kernel
 - MAX77865: charger state and USB routing of the MUIC
@@ -155,6 +161,10 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
   `GALLIUM_DRIVER=llvmpipe`, no libhybris), libhybris on 4.4
 - PulseAudio: the speaker sink has to be optional (`.nofail`) while there is no
   sound driver, otherwise waybar's volume module hangs
+- [`rootfs/10-microsd.rules`](rootfs/10-microsd.rules): udev rule that marks
+  the microSD card read-only (my card's data must not be touched; drop that
+  line if you want to write to yours) and keeps requests short enough for the
+  current low card clock
 - [`rootfs/init-wrapper`](rootfs/init-wrapper): bring-up helper used with
   `DEV=1` builds; collects logs and returns to TWRP if USB networking does not
   come up

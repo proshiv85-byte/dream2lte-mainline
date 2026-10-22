@@ -1,0 +1,6 @@
+# The microSD card holds data that must not be modified: make every
+# mmcblk device (whole card and partitions) read-only as soon as it appears.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", RUN+="/usr/bin/blockdev --setro /dev/%k"
+# The card runs at a low clock for now (mainline): keep requests short enough
+# for the dw_mmc read timeout.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]", ATTR{queue/max_sectors_kb}="256"

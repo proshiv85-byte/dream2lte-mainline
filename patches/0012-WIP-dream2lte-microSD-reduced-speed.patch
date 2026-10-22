@@ -1,0 +1,159 @@
+From b1cc8c12d0f1bb0234940c025ab9397dad3039bc Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Fri, 23 Oct 2026 00:14:56 +0300
+Subject: [PATCH 12/12] WIP: dream2lte microSD (reduced speed)
+
+S2MPS17 LDO2 (card I/O supply, off at boot) and the TFLASH_EN switched
+card supply, card detect, dw_mmc node. Data reads only work up to about
+7 MHz so far; above that the card's data never arrives whatever the
+CLKSEL sample/drive phase, clock source, divider mode, I/O voltage or
+clock gating, so the clock is capped for now (~3.3 MB/s).
+
+mmc: block: the single block transfer flag of a request was never
+cleared, so once a request slot had been retried (e.g. a harmless
+out-of-range on the card's last block) all later requests using that
+slot were done one 512-byte block at a time. Clear it with the retry
+count when a new request is prepared.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../boot/dts/exynos/exynos8895-dream2lte.dts  | 58 +++++++++++++++++++
+ drivers/mmc/core/queue.c                      |  2 +
+ drivers/regulator/s2mps17-regulator.c         |  3 +
+ 3 files changed, 63 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+index 03b451b06..156bd8fca 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -121,6 +121,17 @@ gnss_if@ffc00000 {
+ 		};
+ 	};
+ 
++	sd_vmmc: regulator-sd-vmmc {
++		compatible = "regulator-fixed";
++		regulator-name = "sd-vmmc";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		gpio = <&gpb1 1 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		pinctrl-names = "default";
++		pinctrl-0 = <&sd2_pwr>;
++	};
++
+ 	ufs_vcc: regulator-ufs-vcc {
+ 		compatible = "regulator-fixed";
+ 		regulator-name = "ufs-vcc";
+@@ -184,6 +195,31 @@ &decon {
+ 	status = "okay";
+ };
+ 
++/*
++ * microSD. No UHS, the card stays at 3.3 V signalling. Data reads only work
++ * reliably up to ~7 MHz so far (above that the card's data never arrives,
++ * whatever the sample/drive phase), so the clock is capped for now.
++ */
++&mmc {
++	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd>;
++	pinctrl-names = "default";
++
++	bus-width = <4>;
++	max-frequency = <8000000>;
++	card-detect-delay = <200>;
++	cd-gpios = <&gpa1 5 GPIO_ACTIVE_LOW>;
++	clock-frequency = <800000000>;
++	disable-wp;
++	vmmc-supply = <&sd_vmmc>;
++	vqmmc-supply = <&sd_vqmmc>;
++
++	samsung,dw-mshc-ciu-div = <3>;
++	samsung,dw-mshc-ddr-timing = <1 2>;
++	samsung,dw-mshc-sdr-timing = <0 2>;
++
++	status = "okay";
++};
++
+ &hsi2c_23 {
+ 	status = "okay";
+ 
+@@ -235,6 +271,13 @@ &pcie_wifi0 {
+ };
+ 
+ &pinctrl_alive {
++	sd2_cd: sd2-cd-pins {
++		samsung,pins = "gpa1-5";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV4>;
++	};
++
+ 	key_power: key-power-pins {
+ 		samsung,pins = "gpa2-4";
+ 		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+@@ -304,6 +347,12 @@ pmic@1 {
+ 		reg = <0x1>;
+ 
+ 		regulators {
++			sd_vqmmc: LDO2 {
++				regulator-name = "sd-vqmmc";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <3300000>;
++			};
++
+ 			tsp_io: LDO34 {
+ 				regulator-name = "tsp_io";
+ 				regulator-min-microvolt = <1850000>;
+@@ -383,3 +432,12 @@ wlan_en: wlan-en-pins {
+ 		samsung,pin-drv = <3>;
+ 	};
+ };
++
++&pinctrl_peric0 {
++	sd2_pwr: sd2-pwr-pins {
++		samsung,pins = "gpb1-1";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV4>;
++	};
++};
+diff --git a/drivers/mmc/core/queue.c b/drivers/mmc/core/queue.c
+index 5d187e063..6d53d8ad0 100644
+--- a/drivers/mmc/core/queue.c
++++ b/drivers/mmc/core/queue.c
+@@ -301,6 +301,8 @@ static blk_status_t mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
+ 
+ 	if (!(req->rq_flags & RQF_DONTPREP)) {
+ 		req_to_mmc_queue_req(req)->retries = 0;
++		/* single block transfers are only for retrying this request */
++		req_to_mmc_queue_req(req)->flags = 0;
+ 		req->rq_flags |= RQF_DONTPREP;
+ 	}
+ 
+diff --git a/drivers/regulator/s2mps17-regulator.c b/drivers/regulator/s2mps17-regulator.c
+index ca5dd4b5a..f7101aa0f 100644
+--- a/drivers/regulator/s2mps17-regulator.c
++++ b/drivers/regulator/s2mps17-regulator.c
+@@ -15,6 +15,7 @@
+ #include <linux/regulator/driver.h>
+ #include <linux/regulator/of_regulator.h>
+ 
++#define S2MPS17_REG_L2CTRL		0x3e
+ #define S2MPS17_REG_L34CTRL		0x5f
+ #define S2MPS17_REG_L35CTRL		0x60
+ 
+@@ -26,6 +27,7 @@
+ #define S2MPS17_ENABLE_TIME_LDO		128
+ 
+ enum s2mps17_regulators {
++	S2MPS17_LDO2,
+ 	S2MPS17_LDO34,
+ 	S2MPS17_LDO35,
+ 	S2MPS17_REGULATOR_MAX,
+@@ -62,6 +64,7 @@ static const struct regulator_ops s2mps17_ldo_ops = {
+ }
+ 
+ static const struct regulator_desc s2mps17_regulators[] = {
++	S2MPS17_LDO(2, 1800000, 25000),
+ 	S2MPS17_LDO(34, 700000, 25000),
+ 	S2MPS17_LDO(35, 1800000, 25000),
+ };

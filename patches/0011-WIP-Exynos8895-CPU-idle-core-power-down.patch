@@ -1,0 +1,282 @@
+From 8d5559eb225b359c73cfd69cb21fec500668912f Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Thu, 22 Oct 2026 23:32:11 +0300
+Subject: [PATCH 11/12] WIP: Exynos8895 CPU idle (core power-down)
+
+PSCI CPU_SUSPEND idle state per cluster, values from the vendor kernel.
+The firmware only prepares the core; exynos8895-cpupm programs the
+core's local power configuration in the PMU around the PSCI call
+(CPU PM notifier), like the vendor exynos_cpu_pm_enter/exit. Cluster
+power-down is disarmed at boot: the bootloader leaves it enabled on the
+Mongoose cluster, and with a core-only PSCI state the L2 lost its dirty
+lines once all four cores were off (memory corruption).
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi |  31 +++++
+ drivers/soc/samsung/Kconfig                |  11 ++
+ drivers/soc/samsung/Makefile               |   1 +
+ drivers/soc/samsung/exynos8895-cpupm.c     | 125 +++++++++++++++++++++
+ 4 files changed, 168 insertions(+)
+ create mode 100644 drivers/soc/samsung/exynos8895-cpupm.c
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index a6aaeef60..4fb3d23c3 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -32,6 +32,29 @@ cpus {
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+ 
++		idle-states {
++			entry-method = "psci";
++
++			/* core power down, values from the vendor kernel */
++			little_cpu_sleep: cpu-sleep-0 {
++				compatible = "arm,idle-state";
++				arm,psci-suspend-param = <0x0010000>;
++				local-timer-stop;
++				entry-latency-us = <35>;
++				exit-latency-us = <90>;
++				min-residency-us = <750>;
++			};
++
++			big_cpu_sleep: cpu-sleep-1 {
++				compatible = "arm,idle-state";
++				arm,psci-suspend-param = <0x0010000>;
++				local-timer-stop;
++				entry-latency-us = <30>;
++				exit-latency-us = <75>;
++				min-residency-us = <2000>;
++			};
++		};
++
+ 		cpu-map {
+ 			cluster0 {
+ 				core0 {
+@@ -77,6 +100,7 @@ cpu0: cpu@100 {
+ 			enable-method = "psci";
+ 			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
+ 			capacity-dmips-mhz = <451>;
++			cpu-idle-states = <&little_cpu_sleep>;
+ 			#cooling-cells = <2>;
+ 			operating-points-v2 = <&cpucl1_opp_table>;
+ 		};
+@@ -88,6 +112,7 @@ cpu1: cpu@101 {
+ 			enable-method = "psci";
+ 			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
+ 			capacity-dmips-mhz = <451>;
++			cpu-idle-states = <&little_cpu_sleep>;
+ 			#cooling-cells = <2>;
+ 			operating-points-v2 = <&cpucl1_opp_table>;
+ 		};
+@@ -99,6 +124,7 @@ cpu2: cpu@102 {
+ 			enable-method = "psci";
+ 			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
+ 			capacity-dmips-mhz = <451>;
++			cpu-idle-states = <&little_cpu_sleep>;
+ 			#cooling-cells = <2>;
+ 			operating-points-v2 = <&cpucl1_opp_table>;
+ 		};
+@@ -110,6 +136,7 @@ cpu3: cpu@103 {
+ 			enable-method = "psci";
+ 			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
+ 			capacity-dmips-mhz = <451>;
++			cpu-idle-states = <&little_cpu_sleep>;
+ 			#cooling-cells = <2>;
+ 			operating-points-v2 = <&cpucl1_opp_table>;
+ 		};
+@@ -121,6 +148,7 @@ cpu4: cpu@0 {
+ 			enable-method = "psci";
+ 			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>;
+ 			capacity-dmips-mhz = <1024>;
++			cpu-idle-states = <&big_cpu_sleep>;
+ 			#cooling-cells = <2>;
+ 			operating-points-v2 = <&cpucl0_opp_table>;
+ 		};
+@@ -132,6 +160,7 @@ cpu5: cpu@1 {
+ 			enable-method = "psci";
+ 			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>;
+ 			capacity-dmips-mhz = <1024>;
++			cpu-idle-states = <&big_cpu_sleep>;
+ 			#cooling-cells = <2>;
+ 			operating-points-v2 = <&cpucl0_opp_table>;
+ 		};
+@@ -143,6 +172,7 @@ cpu6: cpu@2 {
+ 			enable-method = "psci";
+ 			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>;
+ 			capacity-dmips-mhz = <1024>;
++			cpu-idle-states = <&big_cpu_sleep>;
+ 			#cooling-cells = <2>;
+ 			operating-points-v2 = <&cpucl0_opp_table>;
+ 		};
+@@ -154,6 +184,7 @@ cpu7: cpu@3 {
+ 			enable-method = "psci";
+ 			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>;
+ 			capacity-dmips-mhz = <1024>;
++			cpu-idle-states = <&big_cpu_sleep>;
+ 			#cooling-cells = <2>;
+ 			operating-points-v2 = <&cpucl0_opp_table>;
+ 		};
+diff --git a/drivers/soc/samsung/Kconfig b/drivers/soc/samsung/Kconfig
+index 1a5dfdc97..117575ec9 100644
+--- a/drivers/soc/samsung/Kconfig
++++ b/drivers/soc/samsung/Kconfig
+@@ -37,6 +37,17 @@ config EXYNOS_USI
+ 	  This driver allows one to configure USI for desired protocol, which
+ 	  is usually done in USI node in Device Tree.
+ 
++config EXYNOS8895_CPUPM
++	bool "Exynos8895 CPU power-down for cpuidle" if COMPILE_TEST
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	depends on CPU_PM
++	default ARCH_EXYNOS && ARM_PSCI_CPUIDLE
++	help
++	  Programs the per-core power configuration of the Exynos8895 PMU
++	  around PSCI idle states, so that idle cores are actually switched
++	  off. It can be turned off at runtime with the "enable" module
++	  parameter.
++
+ config EXYNOS_PMU
+ 	bool "Exynos PMU controller driver" if COMPILE_TEST
+ 	depends on ARCH_EXYNOS || ((ARM || ARM64) && COMPILE_TEST)
+diff --git a/drivers/soc/samsung/Makefile b/drivers/soc/samsung/Makefile
+index 636a76260..191c27082 100644
+--- a/drivers/soc/samsung/Makefile
++++ b/drivers/soc/samsung/Makefile
+@@ -14,3 +14,4 @@ obj-$(CONFIG_EXYNOS_PMU_ARM_DRIVERS)	+= exynos3250-pmu.o exynos4-pmu.o \
+ obj-$(CONFIG_EXYNOS_REGULATOR_COUPLER) += exynos-regulator-coupler.o
+ 
+ obj-$(CONFIG_SAMSUNG_PM_CHECK)	+= s3c-pm-check.o
++obj-$(CONFIG_EXYNOS8895_CPUPM)	+= exynos8895-cpupm.o
+diff --git a/drivers/soc/samsung/exynos8895-cpupm.c b/drivers/soc/samsung/exynos8895-cpupm.c
+new file mode 100644
+index 000000000..29f381d9a
+--- /dev/null
++++ b/drivers/soc/samsung/exynos8895-cpupm.c
+@@ -0,0 +1,125 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Exynos8895 CPU power-down for cpuidle
++ *
++ * The EL3 firmware's PSCI CPU_SUSPEND prepares the core for power-down, but
++ * the core is only switched off when its local power configuration in the
++ * PMU says so. As on the vendor kernel, clear it right before the PSCI call
++ * and set it again on the way out.
++ *
++ * Only cores are powered down: the PSCI state does not flush the L2, so the
++ * cluster power-down the bootloader leaves armed on one cluster would lose
++ * its dirty lines once all of its cores are off.
++ */
++
++#include <linux/cpu_pm.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <asm/cputype.h>
++
++/* local power configuration of a core, index ((aff1 << 2) | aff0) */
++#define PMU_CPU_CONFIGURATION(n)	(0x2000 + (n) * 0x80)
++#define PMU_CPU_LOCAL_PWR_CFG		0xf
++/* cluster power-down (L2 included) once all its cores are off */
++#define PMU_CLUSTER_CPUSEQ_OPTION(c)	(0x2488 + (c) * 0x20)
++#define PMU_CLUSTER_CPUSEQ_PWRDN	BIT(0)
++#define NR_CLUSTERS			2
++/* droop detector of the Mongoose cores, follows the core power state */
++#define DD_DA_INPUT(n)			((n) * 0x400)
++#define DD_DA_INPUT_EN			BIT(0)
++#define DD_BASE				0x16840000
++#define DD_SIZE				0x1000
++#define NR_DD_CORES			4
++
++static bool enable = true;
++module_param(enable, bool, 0644);
++MODULE_PARM_DESC(enable, "allow cores to power down when idle");
++
++static void __iomem *pmu_base;
++static void __iomem *dd_base;
++
++static unsigned int exynos8895_phycpu(void)
++{
++	u64 mpidr = read_cpuid_mpidr();
++
++	return (MPIDR_AFFINITY_LEVEL(mpidr, 1) << 2) |
++	       MPIDR_AFFINITY_LEVEL(mpidr, 0);
++}
++
++static void exynos8895_cpu_power(unsigned int n, bool on)
++{
++	if (n < NR_DD_CORES && !on)
++		writel(0, dd_base + DD_DA_INPUT(n));
++
++	writel(on ? PMU_CPU_LOCAL_PWR_CFG : 0,
++	       pmu_base + PMU_CPU_CONFIGURATION(n));
++
++	if (n < NR_DD_CORES && on)
++		writel(DD_DA_INPUT_EN, dd_base + DD_DA_INPUT(n));
++}
++
++static int exynos8895_cpu_pm_notify(struct notifier_block *nb,
++				    unsigned long action, void *data)
++{
++	switch (action) {
++	case CPU_PM_ENTER:
++		/* the idle state is skipped while power-down is not allowed */
++		if (!READ_ONCE(enable))
++			return NOTIFY_BAD;
++		exynos8895_cpu_power(exynos8895_phycpu(), false);
++		break;
++	case CPU_PM_ENTER_FAILED:
++	case CPU_PM_EXIT:
++		exynos8895_cpu_power(exynos8895_phycpu(), true);
++		break;
++	}
++
++	return NOTIFY_OK;
++}
++
++static struct notifier_block exynos8895_cpu_pm_nb = {
++	.notifier_call = exynos8895_cpu_pm_notify,
++	/* last in, so the core config is the final step before PSCI */
++	.priority = INT_MIN,
++};
++
++static int __init exynos8895_cpupm_init(void)
++{
++	struct device_node *np;
++	unsigned int c;
++
++	if (!of_machine_is_compatible("samsung,exynos8895"))
++		return 0;
++
++	np = of_find_compatible_node(NULL, NULL, "samsung,exynos8895-pmu");
++	if (!np)
++		return -ENODEV;
++
++	pmu_base = of_iomap(np, 0);
++	of_node_put(np);
++	if (!pmu_base)
++		return -ENOMEM;
++
++	dd_base = ioremap(DD_BASE, DD_SIZE);
++	if (!dd_base) {
++		iounmap(pmu_base);
++		return -ENOMEM;
++	}
++
++	for (c = 0; c < NR_CLUSTERS; c++) {
++		u32 val = readl(pmu_base + PMU_CLUSTER_CPUSEQ_OPTION(c));
++
++		writel(val & ~PMU_CLUSTER_CPUSEQ_PWRDN,
++		       pmu_base + PMU_CLUSTER_CPUSEQ_OPTION(c));
++	}
++
++	return cpu_pm_register_notifier(&exynos8895_cpu_pm_nb);
++}
++arch_initcall(exynos8895_cpupm_init);
++
++MODULE_DESCRIPTION("Exynos8895 CPU power-down for cpuidle");
++MODULE_LICENSE("GPL");
