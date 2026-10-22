@@ -1,0 +1,1164 @@
+From dcfaefa2d2329742d7b2330eb4585a4ae0a77951 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Thu, 22 Oct 2026 18:23:14 +0300
+Subject: [PATCH 6/6] WIP: Exynos8895 ACPM DVFS (cpufreq) + TMU thermal
+
+exynos-acpm: load and attach the firmware plugins the 8895 ACPM expects
+the host to manage (the kernel DVFS plugin replaces the bootloader one),
+add the 8895 match data. clk-acpm: 8895 DVFS clocks; the firmware does
+not answer FREQ_GET, so the last rate set is reported.
+
+New exynos8895_tmu driver: read-only, one thermal sensor per TMU probe
+with per-probe calibration, left armed by the bootloader.
+
+DT: AP2APM mailbox, APM SRAM, ACPM node, CPU OPP tables from the vendor
+cpufreq domains, capacity-dmips-mhz, TMU blocks and thermal zones with
+cpufreq cooling.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    | 416 ++++++++++++++++++
+ drivers/clk/samsung/clk-acpm.c                |  55 ++-
+ drivers/firmware/samsung/exynos-acpm.c        | 170 ++++++-
+ drivers/thermal/samsung/Kconfig               |  13 +
+ drivers/thermal/samsung/Makefile              |   1 +
+ drivers/thermal/samsung/exynos8895_tmu.c      | 173 ++++++++
+ .../clock/samsung,exynos8895-acpm.h           |  20 +
+ 7 files changed, 840 insertions(+), 8 deletions(-)
+ create mode 100644 drivers/thermal/samsung/exynos8895_tmu.c
+ create mode 100644 include/dt-bindings/clock/samsung,exynos8895-acpm.h
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index 2c6d691b2..2ac221a32 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -6,7 +6,9 @@
+  */
+ 
+ #include <dt-bindings/clock/samsung,exynos8895.h>
++#include <dt-bindings/clock/samsung,exynos8895-acpm.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
++#include <dt-bindings/thermal/thermal.h>
+ 
+ / {
+ 	compatible = "samsung,exynos8895";
+@@ -73,6 +75,10 @@ cpu4: cpu@0 {
+ 			compatible = "samsung,mongoose-m2";
+ 			reg = <0x0>;
+ 			enable-method = "psci";
++			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>;
++			capacity-dmips-mhz = <1024>;
++			#cooling-cells = <2>;
++			operating-points-v2 = <&cpucl0_opp_table>;
+ 		};
+ 
+ 		cpu5: cpu@1 {
+@@ -80,6 +86,10 @@ cpu5: cpu@1 {
+ 			compatible = "samsung,mongoose-m2";
+ 			reg = <0x1>;
+ 			enable-method = "psci";
++			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>;
++			capacity-dmips-mhz = <1024>;
++			#cooling-cells = <2>;
++			operating-points-v2 = <&cpucl0_opp_table>;
+ 		};
+ 
+ 		cpu6: cpu@2 {
+@@ -87,6 +97,10 @@ cpu6: cpu@2 {
+ 			compatible = "samsung,mongoose-m2";
+ 			reg = <0x2>;
+ 			enable-method = "psci";
++			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>;
++			capacity-dmips-mhz = <1024>;
++			#cooling-cells = <2>;
++			operating-points-v2 = <&cpucl0_opp_table>;
+ 		};
+ 
+ 		cpu7: cpu@3 {
+@@ -94,6 +108,10 @@ cpu7: cpu@3 {
+ 			compatible = "samsung,mongoose-m2";
+ 			reg = <0x3>;
+ 			enable-method = "psci";
++			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>;
++			capacity-dmips-mhz = <1024>;
++			#cooling-cells = <2>;
++			operating-points-v2 = <&cpucl0_opp_table>;
+ 		};
+ 
+ 		cpu0: cpu@100 {
+@@ -101,6 +119,10 @@ cpu0: cpu@100 {
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x100>;
+ 			enable-method = "psci";
++			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
++			capacity-dmips-mhz = <451>;
++			#cooling-cells = <2>;
++			operating-points-v2 = <&cpucl1_opp_table>;
+ 		};
+ 
+ 		cpu1: cpu@101 {
+@@ -108,6 +130,10 @@ cpu1: cpu@101 {
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x101>;
+ 			enable-method = "psci";
++			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
++			capacity-dmips-mhz = <451>;
++			#cooling-cells = <2>;
++			operating-points-v2 = <&cpucl1_opp_table>;
+ 		};
+ 
+ 		cpu2: cpu@102 {
+@@ -115,6 +141,10 @@ cpu2: cpu@102 {
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x102>;
+ 			enable-method = "psci";
++			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
++			capacity-dmips-mhz = <451>;
++			#cooling-cells = <2>;
++			operating-points-v2 = <&cpucl1_opp_table>;
+ 		};
+ 
+ 		cpu3: cpu@103 {
+@@ -122,6 +152,145 @@ cpu3: cpu@103 {
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x103>;
+ 			enable-method = "psci";
++			clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
++			capacity-dmips-mhz = <451>;
++			#cooling-cells = <2>;
++			operating-points-v2 = <&cpucl1_opp_table>;
++		};
++	};
++
++	/* Mongoose M2 cluster */
++	cpucl0_opp_table: opp-table-0 {
++		compatible = "operating-points-v2";
++		opp-shared;
++
++		opp-741000000 {
++			opp-hz = /bits/ 64 <741000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-858000000 {
++			opp-hz = /bits/ 64 <858000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-962000000 {
++			opp-hz = /bits/ 64 <962000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1066000000 {
++			opp-hz = /bits/ 64 <1066000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1170000000 {
++			opp-hz = /bits/ 64 <1170000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1261000000 {
++			opp-hz = /bits/ 64 <1261000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1469000000 {
++			opp-hz = /bits/ 64 <1469000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1703000000 {
++			opp-hz = /bits/ 64 <1703000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1807000000 {
++			opp-hz = /bits/ 64 <1807000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1937000000 {
++			opp-hz = /bits/ 64 <1937000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-2002000000 {
++			opp-hz = /bits/ 64 <2002000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-2158000000 {
++			opp-hz = /bits/ 64 <2158000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-2314000000 {
++			opp-hz = /bits/ 64 <2314000000>;
++			clock-latency-ns = <500000>;
++		};
++	};
++
++	/* Cortex-A53 cluster */
++	cpucl1_opp_table: opp-table-1 {
++		compatible = "operating-points-v2";
++		opp-shared;
++
++		opp-455000000 {
++			opp-hz = /bits/ 64 <455000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-598000000 {
++			opp-hz = /bits/ 64 <598000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-715000000 {
++			opp-hz = /bits/ 64 <715000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-832000000 {
++			opp-hz = /bits/ 64 <832000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-949000000 {
++			opp-hz = /bits/ 64 <949000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1053000000 {
++			opp-hz = /bits/ 64 <1053000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1248000000 {
++			opp-hz = /bits/ 64 <1248000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1456000000 {
++			opp-hz = /bits/ 64 <1456000000>;
++			clock-latency-ns = <500000>;
++		};
++
++		opp-1690000000 {
++			opp-hz = /bits/ 64 <1690000000>;
++			clock-latency-ns = <500000>;
++		};
++	};
++
++	firmware {
++		acpm_ipc: power-management {
++			compatible = "samsung,exynos8895-acpm-ipc";
++			#clock-cells = <1>;
++			mboxes = <&ap2apm_mailbox>;
++			shmem = <&apm_sram>;
++			/* the firmware can't report rates, start from known ones */
++			assigned-clocks = <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL0>,
++					  <&acpm_ipc EXYNOS8895_CLK_ACPM_DVFS_CPUCL1>;
++			assigned-clock-rates = <1469000000>, <1053000000>;
+ 		};
+ 	};
+ 
+@@ -205,6 +374,24 @@ timer@10040000 {
+ 				     <GIC_SPI 466 IRQ_TYPE_LEVEL_HIGH>;
+ 		};
+ 
++		tmu_cpu: tmu@10080000 {
++			compatible = "samsung,exynos8895-tmu";
++			reg = <0x10080000 0x400>;
++			interrupts = <GIC_SPI 451 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&cmu_peris CLK_GOUT_PERIS_BUSIF_TMU_PCLK>;
++			clock-names = "tmu_apbif";
++			#thermal-sensor-cells = <1>;
++		};
++
++		tmu_gpu: tmu@10084000 {
++			compatible = "samsung,exynos8895-tmu";
++			reg = <0x10084000 0x400>;
++			interrupts = <GIC_SPI 452 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&cmu_peris CLK_GOUT_PERIS_BUSIF_TMU_PCLK>;
++			clock-names = "tmu_apbif";
++			#thermal-sensor-cells = <1>;
++		};
++
+ 		gic: interrupt-controller@10201000 {
+ 			compatible = "arm,gic-400";
+ 			reg = <0x10201000 0x1000>,
+@@ -1592,6 +1779,17 @@ speedy: speedy@15b50000 {
+ 			status = "disabled";
+ 		};
+ 
++		ap2apm_mailbox: mailbox@16440000 {
++			compatible = "samsung,exynos8895-mbox",
++				     "samsung,exynos850-mbox";
++			reg = <0x16440000 0x1000>;
++			/* the mailbox gate lives in CMU_APM, which has no driver yet */
++			clocks = <&cmu_top CLK_DOUT_CMU_APM_BUS>;
++			clock-names = "pclk";
++			interrupts = <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>;
++			#mbox-cells = <0>;
++		};
++
+ 		pmu_system_controller: system-controller@16480000 {
+ 			compatible = "samsung,exynos8895-pmu",
+ 				     "samsung,exynos7-pmu", "syscon";
+@@ -1609,6 +1807,224 @@ wakeup-interrupt-controller {
+ 				interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
+ 			};
+ 		};
++
++		apm_sram: sram@16500000 {
++			compatible = "mmio-sram";
++			reg = <0x16500000 0xb400>;
++			#address-cells = <1>;
++			#size-cells = <1>;
++			ranges = <0x0 0x16500000 0xb400>;
++		};
++	};
++
++	thermal-zones {
++		big-thermal {
++			polling-delay-passive = <100>;
++			polling-delay = <1000>;
++			thermal-sensors = <&tmu_cpu 0>;
++
++			trips {
++				big_alert: big-alert {
++					temperature = <80000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				big-critical {
++					temperature = <115000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&big_alert>;
++					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		big0-thermal {
++			polling-delay-passive = <100>;
++			polling-delay = <1000>;
++			thermal-sensors = <&tmu_cpu 2>;
++
++			trips {
++				big0_alert: big0-alert {
++					temperature = <80000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				big0-critical {
++					temperature = <115000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&big0_alert>;
++					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		big1-thermal {
++			polling-delay-passive = <100>;
++			polling-delay = <1000>;
++			thermal-sensors = <&tmu_cpu 3>;
++
++			trips {
++				big1_alert: big1-alert {
++					temperature = <80000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				big1-critical {
++					temperature = <115000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&big1_alert>;
++					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		big2-thermal {
++			polling-delay-passive = <100>;
++			polling-delay = <1000>;
++			thermal-sensors = <&tmu_cpu 4>;
++
++			trips {
++				big2_alert: big2-alert {
++					temperature = <80000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				big2-critical {
++					temperature = <115000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&big2_alert>;
++					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		big3-thermal {
++			polling-delay-passive = <100>;
++			polling-delay = <1000>;
++			thermal-sensors = <&tmu_cpu 5>;
++
++			trips {
++				big3_alert: big3-alert {
++					temperature = <80000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				big3-critical {
++					temperature = <115000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&big3_alert>;
++					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		little-thermal {
++			polling-delay-passive = <100>;
++			polling-delay = <1000>;
++			thermal-sensors = <&tmu_cpu 1>;
++
++			trips {
++				little_alert: little-alert {
++					temperature = <90000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				little-critical {
++					temperature = <115000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&little_alert>;
++					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		gpu-thermal {
++			polling-delay-passive = <100>;
++			polling-delay = <1000>;
++			thermal-sensors = <&tmu_gpu 0>;
++
++			trips {
++				gpu-critical {
++					temperature = <115000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++		};
++
++		isp-thermal {
++			polling-delay-passive = <100>;
++			polling-delay = <1000>;
++			thermal-sensors = <&tmu_gpu 1>;
++
++			trips {
++				isp-critical {
++					temperature = <115000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++		};
+ 	};
+ 
+ 	timer {
+diff --git a/drivers/clk/samsung/clk-acpm.c b/drivers/clk/samsung/clk-acpm.c
+index 7680bc8c5..b66d677ed 100644
+--- a/drivers/clk/samsung/clk-acpm.c
++++ b/drivers/clk/samsung/clk-acpm.c
+@@ -21,16 +21,26 @@ struct acpm_clk {
+ 	struct clk_hw hw;
+ 	unsigned int mbox_chan_id;
+ 	struct acpm_handle *handle;
++	bool cache_rate;
++	unsigned long rate;
+ };
+ 
+ struct acpm_clk_variant {
+ 	const char *name;
+ };
+ 
++/**
++ * struct acpm_clk_driver_data - per-SoC ACPM clock description.
++ * @clks:		clocks, indexed by their ACPM ID.
++ * @nr_clks:		number of clocks.
++ * @mbox_chan_id:	ACPM channel used for DVFS requests.
++ * @cache_rate:		the firmware can't report rates, return the last one set.
++ */
+ struct acpm_clk_driver_data {
+ 	const struct acpm_clk_variant *clks;
+ 	unsigned int nr_clks;
+ 	unsigned int mbox_chan_id;
++	bool cache_rate;
+ };
+ 
+ #define to_acpm_clk(clk) container_of(clk, struct acpm_clk, hw)
+@@ -63,11 +73,34 @@ static const struct acpm_clk_driver_data acpm_clk_gs101 = {
+ 	.mbox_chan_id = 0,
+ };
+ 
++static const struct acpm_clk_variant exynos8895_acpm_clks[] = {
++	ACPM_CLK("mif"),
++	ACPM_CLK("int"),
++	ACPM_CLK("cpucl0"),
++	ACPM_CLK("cpucl1"),
++	ACPM_CLK("g3d"),
++	ACPM_CLK("intcam"),
++	ACPM_CLK("cam"),
++	ACPM_CLK("disp"),
++	ACPM_CLK("g3dm"),
++	ACPM_CLK("cp"),
++};
++
++static const struct acpm_clk_driver_data acpm_clk_exynos8895 = {
++	.clks = exynos8895_acpm_clks,
++	.nr_clks = ARRAY_SIZE(exynos8895_acpm_clks),
++	.mbox_chan_id = 0,
++	.cache_rate = true,
++};
++
+ static unsigned long acpm_clk_recalc_rate(struct clk_hw *hw,
+ 					  unsigned long parent_rate)
+ {
+ 	struct acpm_clk *clk = to_acpm_clk(hw);
+ 
++	if (clk->cache_rate)
++		return clk->rate;
++
+ 	return clk->handle->ops->dvfs.get_rate(clk->handle, clk->mbox_chan_id,
+ 					       clk->id);
+ }
+@@ -76,9 +109,14 @@ static int acpm_clk_set_rate(struct clk_hw *hw, unsigned long rate,
+ 			     unsigned long parent_rate)
+ {
+ 	struct acpm_clk *clk = to_acpm_clk(hw);
++	int ret;
++
++	ret = clk->handle->ops->dvfs.set_rate(clk->handle, clk->mbox_chan_id,
++					      clk->id, rate);
++	if (!ret)
++		clk->rate = rate;
+ 
+-	return clk->handle->ops->dvfs.set_rate(clk->handle, clk->mbox_chan_id,
+-					       clk->id, rate);
++	return ret;
+ }
+ 
+ static const struct clk_ops acpm_clk_ops = {
+@@ -101,6 +139,7 @@ static int acpm_clk_register(struct device *dev, struct acpm_clk *aclk,
+ 
+ static int acpm_clk_probe(struct platform_device *pdev)
+ {
++	const struct acpm_clk_driver_data *data;
+ 	struct acpm_handle *acpm_handle;
+ 	struct clk_hw_onecell_data *clk_data;
+ 	struct clk_hw **hws;
+@@ -114,8 +153,10 @@ static int acpm_clk_probe(struct platform_device *pdev)
+ 		return dev_err_probe(dev, PTR_ERR(acpm_handle),
+ 				     "Failed to get acpm handle\n");
+ 
+-	count = acpm_clk_gs101.nr_clks;
+-	mbox_chan_id = acpm_clk_gs101.mbox_chan_id;
++	data = (const struct acpm_clk_driver_data *)
++		platform_get_device_id(pdev)->driver_data;
++	count = data->nr_clks;
++	mbox_chan_id = data->mbox_chan_id;
+ 
+ 	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, count),
+ 				GFP_KERNEL);
+@@ -139,11 +180,12 @@ static int acpm_clk_probe(struct platform_device *pdev)
+ 		aclk->id = i;
+ 		aclk->handle = acpm_handle;
+ 		aclk->mbox_chan_id = mbox_chan_id;
++		aclk->cache_rate = data->cache_rate;
+ 
+ 		hws[i] = &aclk->hw;
+ 
+ 		err = acpm_clk_register(dev, aclk,
+-					acpm_clk_gs101.clks[i].name);
++					data->clks[i].name);
+ 		if (err)
+ 			return dev_err_probe(dev, err,
+ 					     "Failed to register clock\n");
+@@ -154,7 +196,8 @@ static int acpm_clk_probe(struct platform_device *pdev)
+ }
+ 
+ static const struct platform_device_id acpm_clk_id[] = {
+-	{ .name = "gs101-acpm-clk" },
++	{ .name = "gs101-acpm-clk", .driver_data = (kernel_ulong_t)&acpm_clk_gs101 },
++	{ .name = "exynos8895-acpm-clk", .driver_data = (kernel_ulong_t)&acpm_clk_exynos8895 },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(platform, acpm_clk_id);
+diff --git a/drivers/firmware/samsung/exynos-acpm.c b/drivers/firmware/samsung/exynos-acpm.c
+index 942a2e9f0..3e105ae68 100644
+--- a/drivers/firmware/samsung/exynos-acpm.c
++++ b/drivers/firmware/samsung/exynos-acpm.c
+@@ -13,6 +13,7 @@
+ #include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/find.h>
++#include <linux/firmware.h>
+ #include <linux/firmware/samsung/exynos-acpm-protocol.h>
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
+@@ -35,26 +36,58 @@
+ #include "exynos-acpm-tmu.h"
+ 
+ #define ACPM_PROTOCOL_SEQNUM		GENMASK(21, 16)
++#define ACPM_PROTOCOL_PLUGIN_ID		GENMASK(28, 26)
++#define ACPM_PROTOCOL_PLUGIN_ATTACH	BIT(25)
++#define ACPM_PROTOCOL_PLUGIN_DETACH	BIT(24)
+ 
+ #define ACPM_POLL_TIMEOUT_US		(100 * USEC_PER_MSEC)
+ #define ACPM_TX_TIMEOUT_US		500000
+ 
+ #define ACPM_GS101_INITDATA_BASE	0xa000
++#define ACPM_EXYNOS8895_INITDATA_BASE	0x2850
+ 
+ /**
+  * struct acpm_shmem - shared memory configuration information.
+- * @reserved:	unused fields.
++ * @plugins:	offset to array of struct acpm_plugin_shmem.
++ * @num_plugins: number of plugins.
+  * @chans:	offset to array of struct acpm_chan_shmem.
+  * @reserved1:	unused fields.
+  * @num_chans:	number of channels.
+  */
+ struct acpm_shmem {
+-	u32 reserved[2];
++	u32 plugins;
++	u32 num_plugins;
+ 	u32 chans;
+ 	u32 reserved1[3];
+ 	u32 num_chans;
+ };
+ 
++/**
++ * struct acpm_plugin_shmem - descriptor of a firmware plugin.
++ *
++ * Some firmware versions boot with a set of plugins that the host is expected
++ * to replace: plugins that should not stay attached are detached, and plugins
++ * that should be attached but are not yet get their code loaded into SRAM by
++ * the host first.
++ *
++ * @id:			plugin ID.
++ * @base:		offset in SRAM of the plugin code, bit 0 is the Thumb bit.
++ * @reserved:		unused fields.
++ * @is_attached:	true when the plugin is currently attached (u8).
++ * @size:		size of the plugin code.
++ * @stay_attached:	true when the plugin should be attached (u8).
++ * @fw_name:		offset in SRAM of the plugin firmware file name.
++ */
++struct acpm_plugin_shmem {
++	u32 id;
++	u32 base;
++	u32 reserved[5];
++	u32 is_attached;
++	u32 size;
++	u32 stay_attached;
++	u32 fw_name;
++};
++
+ /**
+  * struct acpm_chan_shmem - descriptor of a shared memory channel.
+  *
+@@ -165,6 +198,7 @@ struct acpm_chan {
+  * struct acpm_info - driver's private data.
+  * @shmem:	pointer to the SRAM configuration data.
+  * @sram_base:	base address of SRAM.
++ * @sram_size:	size of SRAM.
+  * @chans:	pointer to the ACPM channel parameters retrieved from SRAM.
+  * @dev:	pointer to the exynos-acpm device.
+  * @handle:	instance of acpm_handle to send to clients.
+@@ -173,6 +207,7 @@ struct acpm_chan {
+ struct acpm_info {
+ 	struct acpm_shmem __iomem *shmem;
+ 	void __iomem *sram_base;
++	resource_size_t sram_size;
+ 	struct acpm_chan *chans;
+ 	struct device *dev;
+ 	struct acpm_handle handle;
+@@ -183,10 +218,13 @@ struct acpm_info {
+  * struct acpm_match_data - of_device_id data.
+  * @initdata_base:	offset in SRAM where the channels configuration resides.
+  * @acpm_clk_dev_name:	base name for the ACPM clocks device that we're registering.
++ * @plugin_chan_id:	channel used to attach/detach plugins, if the host has
++ *			to manage them.
+  */
+ struct acpm_match_data {
+ 	loff_t initdata_base;
+ 	const char *acpm_clk_dev_name;
++	int plugin_chan_id;
+ };
+ 
+ #define client_to_acpm_chan(c) container_of(c, struct acpm_chan, cl)
+@@ -667,6 +705,116 @@ static int acpm_channels_init(struct acpm_info *acpm)
+ 	return 0;
+ }
+ 
++/**
++ * acpm_plugin_cmd() - attach or detach a firmware plugin.
++ * @acpm:	pointer to driver data.
++ * @chan_id:	channel to send the command on.
++ * @id:		plugin ID.
++ * @attach:	true to attach, false to detach.
++ *
++ * Return: 0 on success, -errno otherwise.
++ */
++static int acpm_plugin_cmd(struct acpm_info *acpm, unsigned int chan_id,
++			   u32 id, bool attach)
++{
++	struct acpm_xfer xfer;
++	u32 cmd[4] = {};
++
++	cmd[0] = FIELD_PREP(ACPM_PROTOCOL_PLUGIN_ID, id) |
++		 (attach ? ACPM_PROTOCOL_PLUGIN_ATTACH :
++			   ACPM_PROTOCOL_PLUGIN_DETACH);
++	acpm_set_xfer(&xfer, cmd, ARRAY_SIZE(cmd), chan_id, true);
++
++	return acpm_do_xfer(&acpm->handle, &xfer);
++}
++
++/**
++ * acpm_plugin_load() - copy a plugin firmware file into SRAM.
++ * @acpm:	pointer to driver data.
++ * @plugin:	__iomem pointer to the plugin described in shared memory.
++ *
++ * Return: 0 on success, -errno otherwise.
++ */
++static int acpm_plugin_load(struct acpm_info *acpm,
++			    struct acpm_plugin_shmem __iomem *plugin)
++{
++	u32 base = readl(&plugin->base) & ~1;
++	u32 size = readl(&plugin->size);
++	u32 name_off = readl(&plugin->fw_name);
++	const struct firmware *fw;
++	char name[64];
++	int ret;
++
++	if (!name_off || name_off + sizeof(name) > acpm->sram_size ||
++	    !base || base + size > acpm->sram_size)
++		return -EINVAL;
++
++	memcpy_fromio(name, acpm->sram_base + name_off, sizeof(name) - 1);
++	name[sizeof(name) - 1] = '\0';
++
++	ret = request_firmware(&fw, name, acpm->dev);
++	if (ret)
++		return ret;
++
++	if (fw->size > size || fw->size % 4) {
++		dev_err(acpm->dev, "%s: bad size %zu (slot %u)\n", name,
++			fw->size, size);
++		ret = -EINVAL;
++	} else {
++		__iowrite32_copy(acpm->sram_base + base, fw->data,
++				 fw->size / 4);
++		dev_info(acpm->dev, "loaded plugin %s\n", name);
++	}
++
++	release_firmware(fw);
++
++	return ret;
++}
++
++/**
++ * acpm_plugins_init() - bring the firmware plugins to the state requested by
++ * the firmware.
++ * @acpm:	pointer to driver data.
++ * @chan_id:	channel used for plugin commands.
++ *
++ * Return: 0 on success, -errno otherwise.
++ */
++static int acpm_plugins_init(struct acpm_info *acpm, unsigned int chan_id)
++{
++	struct acpm_shmem __iomem *shmem = acpm->shmem;
++	struct acpm_plugin_shmem __iomem *plugins;
++	u32 i, num, id;
++	bool attached, stay;
++	int ret;
++
++	plugins = acpm->sram_base + readl(&shmem->plugins);
++	num = readl(&shmem->num_plugins);
++
++	for (i = 0; i < num; i++) {
++		id = readl(&plugins[i].id);
++		attached = readl(&plugins[i].is_attached) & 0xff;
++		stay = readl(&plugins[i].stay_attached) & 0xff;
++
++		if (attached == stay)
++			continue;
++
++		if (stay) {
++			ret = acpm_plugin_load(acpm, &plugins[i]);
++			if (ret)
++				return dev_err_probe(acpm->dev, ret,
++						     "plugin %u load failed\n", id);
++		}
++
++		ret = acpm_plugin_cmd(acpm, chan_id, id, stay);
++		if (ret)
++			return dev_err_probe(acpm->dev, ret,
++					     "plugin %u %s failed\n", id,
++					     stay ? "attach" : "detach");
++	}
++
++	return 0;
++}
++
+ static void acpm_clk_pdev_unregister(void *data)
+ {
+ 	platform_device_unregister(data);
+@@ -721,6 +869,7 @@ static int acpm_probe(struct platform_device *pdev)
+ 				     "Failed to get shared memory.\n");
+ 
+ 	size = resource_size(&res);
++	acpm->sram_size = size;
+ 	acpm->sram_base = devm_ioremap(dev, res.start, size);
+ 	if (!acpm->sram_base)
+ 		return dev_err_probe(dev, -ENOMEM,
+@@ -740,6 +889,12 @@ static int acpm_probe(struct platform_device *pdev)
+ 
+ 	acpm->handle.ops = &exynos_acpm_driver_ops;
+ 
++	if (match_data->plugin_chan_id >= 0) {
++		ret = acpm_plugins_init(acpm, match_data->plugin_chan_id);
++		if (ret)
++			return ret;
++	}
++
+ 	platform_set_drvdata(pdev, acpm);
+ 
+ 	acpm_clk_pdev = platform_device_register_data(dev,
+@@ -879,6 +1034,13 @@ EXPORT_SYMBOL_GPL(devm_acpm_get_by_phandle);
+ static const struct acpm_match_data acpm_gs101 = {
+ 	.initdata_base = ACPM_GS101_INITDATA_BASE,
+ 	.acpm_clk_dev_name = "gs101-acpm-clk",
++	.plugin_chan_id = -1,
++};
++
++static const struct acpm_match_data acpm_exynos8895 = {
++	.initdata_base = ACPM_EXYNOS8895_INITDATA_BASE,
++	.acpm_clk_dev_name = "exynos8895-acpm-clk",
++	.plugin_chan_id = 4,
+ };
+ 
+ static const struct of_device_id acpm_match[] = {
+@@ -886,6 +1048,10 @@ static const struct of_device_id acpm_match[] = {
+ 		.compatible = "google,gs101-acpm-ipc",
+ 		.data = &acpm_gs101,
+ 	},
++	{
++		.compatible = "samsung,exynos8895-acpm-ipc",
++		.data = &acpm_exynos8895,
++	},
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(of, acpm_match);
+diff --git a/drivers/thermal/samsung/Kconfig b/drivers/thermal/samsung/Kconfig
+index e1e8035d2..296108645 100644
+--- a/drivers/thermal/samsung/Kconfig
++++ b/drivers/thermal/samsung/Kconfig
+@@ -10,3 +10,16 @@ config EXYNOS_THERMAL
+ 	  the TMU, reports temperature and handles cooling action if defined.
+ 	  This driver uses the Exynos core thermal APIs and TMU configuration
+ 	  data from the supported SoCs.
++
++config EXYNOS8895_THERMAL
++	tristate "Exynos8895 thermal management unit driver"
++	depends on THERMAL_OF
++	depends on HAS_IOMEM
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	default ARCH_EXYNOS
++	help
++	  If you say yes here you get support for reading the temperature
++	  sensors of the Exynos8895 TMU blocks. Every block has up to eight
++	  probes with their own calibration data, each one is exposed as a
++	  separate thermal sensor. The TMU has to be enabled by the bootloader;
++	  trip points are polled by the thermal core.
+diff --git a/drivers/thermal/samsung/Makefile b/drivers/thermal/samsung/Makefile
+index f13940715..f6fbbc035 100644
+--- a/drivers/thermal/samsung/Makefile
++++ b/drivers/thermal/samsung/Makefile
+@@ -4,3 +4,4 @@
+ #
+ obj-$(CONFIG_EXYNOS_THERMAL)			+= exynos_thermal.o
+ exynos_thermal-y				:= exynos_tmu.o
++obj-$(CONFIG_EXYNOS8895_THERMAL)		+= exynos8895_tmu.o
+diff --git a/drivers/thermal/samsung/exynos8895_tmu.c b/drivers/thermal/samsung/exynos8895_tmu.c
+new file mode 100644
+index 000000000..da483f7a2
+--- /dev/null
++++ b/drivers/thermal/samsung/exynos8895_tmu.c
+@@ -0,0 +1,173 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Exynos8895 thermal management unit (TMU) sensor driver
++ *
++ * Each TMU block has up to eight remote temperature probes, every one of them
++ * with its own fused calibration data. The bootloader leaves the blocks
++ * enabled and the hardware thermal trip armed, so this driver only reads the
++ * probes and leaves trips to the thermal core, which polls them.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/clk.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/thermal.h>
++
++#include "../thermal_hwmon.h"
++
++#define EXYNOS8895_TMU_REG_TRIMINFO(n)	(0x0 + (n) * 4)
++#define EXYNOS8895_TMU_REG_CONTROL	0x20
++#define EXYNOS8895_TMU_REG_CONTROL1	0x24
++#define EXYNOS8895_TMU_REG_CURRENT_TEMP	0x40
++
++#define EXYNOS8895_TMU_CALIB_SEL	BIT(23)
++#define EXYNOS8895_TMU_TRIM_25		GENMASK(8, 0)
++#define EXYNOS8895_TMU_TRIM_85		GENMASK(17, 9)
++#define EXYNOS8895_TMU_CORE_EN		BIT(0)
++#define EXYNOS8895_TMU_NUM_PROBE	GENMASK(18, 16)
++#define EXYNOS8895_TMU_TEMP_MASK	GENMASK(8, 0)
++#define EXYNOS8895_TMU_TEMP_SHIFT	9
++
++#define EXYNOS8895_TMU_MAX_PROBES	8
++#define EXYNOS8895_TMU_FIRST_POINT	25000
++#define EXYNOS8895_TMU_SECOND_POINT	85000
++
++struct exynos8895_tmu;
++
++struct exynos8895_tmu_probe {
++	struct exynos8895_tmu *tmu;
++	unsigned int id;
++	int error1;
++	int error2;
++};
++
++struct exynos8895_tmu {
++	void __iomem *base;
++	bool two_point;
++	struct exynos8895_tmu_probe probes[EXYNOS8895_TMU_MAX_PROBES];
++};
++
++static u32 exynos8895_tmu_read_code(struct exynos8895_tmu *tmu, unsigned int id)
++{
++	unsigned int reg, shift;
++
++	/* probes 0-1 share the first register, then three per register */
++	if (id < 2) {
++		reg = 0;
++		shift = id;
++	} else {
++		reg = (id - 2) / 3 + 1;
++		shift = (id - 2) % 3;
++	}
++
++	return (readl(tmu->base + EXYNOS8895_TMU_REG_CURRENT_TEMP + reg * 4) >>
++		(shift * EXYNOS8895_TMU_TEMP_SHIFT)) & EXYNOS8895_TMU_TEMP_MASK;
++}
++
++static int exynos8895_tmu_get_temp(struct thermal_zone_device *tz, int *temp)
++{
++	struct exynos8895_tmu_probe *probe = thermal_zone_device_priv(tz);
++	struct exynos8895_tmu *tmu = probe->tmu;
++	int code = exynos8895_tmu_read_code(tmu, probe->id);
++
++	if (!code)
++		return -EAGAIN;
++
++	if (tmu->two_point)
++		*temp = (code - probe->error1) *
++			(EXYNOS8895_TMU_SECOND_POINT - EXYNOS8895_TMU_FIRST_POINT) /
++			(probe->error2 - probe->error1) +
++			EXYNOS8895_TMU_FIRST_POINT;
++	else
++		*temp = (code - probe->error1) * 1000 +
++			EXYNOS8895_TMU_FIRST_POINT;
++
++	return 0;
++}
++
++static const struct thermal_zone_device_ops exynos8895_tmu_ops = {
++	.get_temp = exynos8895_tmu_get_temp,
++};
++
++static int exynos8895_tmu_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct thermal_zone_device *tzd;
++	struct exynos8895_tmu *tmu;
++	unsigned int i, num_probes;
++	struct clk *clk;
++	u32 trim;
++
++	tmu = devm_kzalloc(dev, sizeof(*tmu), GFP_KERNEL);
++	if (!tmu)
++		return -ENOMEM;
++
++	tmu->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(tmu->base))
++		return PTR_ERR(tmu->base);
++
++	clk = devm_clk_get_optional_enabled(dev, "tmu_apbif");
++	if (IS_ERR(clk))
++		return dev_err_probe(dev, PTR_ERR(clk), "failed to get clock\n");
++
++	if (!(readl(tmu->base + EXYNOS8895_TMU_REG_CONTROL) &
++	      EXYNOS8895_TMU_CORE_EN))
++		return dev_err_probe(dev, -ENODEV,
++				     "TMU not enabled by the bootloader\n");
++
++	num_probes = FIELD_GET(EXYNOS8895_TMU_NUM_PROBE,
++			       readl(tmu->base + EXYNOS8895_TMU_REG_CONTROL1)) + 1;
++	tmu->two_point = readl(tmu->base + EXYNOS8895_TMU_REG_TRIMINFO(0)) &
++			 EXYNOS8895_TMU_CALIB_SEL;
++
++	for (i = 0; i < num_probes; i++) {
++		struct exynos8895_tmu_probe *probe = &tmu->probes[i];
++
++		trim = readl(tmu->base + EXYNOS8895_TMU_REG_TRIMINFO(i));
++		probe->tmu = tmu;
++		probe->id = i;
++		probe->error1 = FIELD_GET(EXYNOS8895_TMU_TRIM_25, trim);
++		probe->error2 = FIELD_GET(EXYNOS8895_TMU_TRIM_85, trim);
++		if (!probe->error1 ||
++		    (tmu->two_point && probe->error2 <= probe->error1)) {
++			dev_warn(dev, "probe %u: bad trim data %#x\n", i, trim);
++			continue;
++		}
++
++		tzd = devm_thermal_of_zone_register(dev, i, probe,
++						    &exynos8895_tmu_ops);
++		if (IS_ERR(tzd)) {
++			if (PTR_ERR(tzd) == -ENODEV)
++				continue;
++			return dev_err_probe(dev, PTR_ERR(tzd),
++					     "failed to register probe %u\n", i);
++		}
++
++		devm_thermal_add_hwmon_sysfs(dev, tzd);
++	}
++
++	return 0;
++}
++
++static const struct of_device_id exynos8895_tmu_match[] = {
++	{ .compatible = "samsung,exynos8895-tmu" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, exynos8895_tmu_match);
++
++static struct platform_driver exynos8895_tmu_driver = {
++	.driver = {
++		.name = "exynos8895-tmu",
++		.of_match_table = exynos8895_tmu_match,
++	},
++	.probe = exynos8895_tmu_probe,
++};
++module_platform_driver(exynos8895_tmu_driver);
++
++MODULE_DESCRIPTION("Exynos8895 TMU sensor driver");
++MODULE_LICENSE("GPL");
+diff --git a/include/dt-bindings/clock/samsung,exynos8895-acpm.h b/include/dt-bindings/clock/samsung,exynos8895-acpm.h
+new file mode 100644
+index 000000000..661888498
+--- /dev/null
++++ b/include/dt-bindings/clock/samsung,exynos8895-acpm.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++/*
++ * Device Tree binding constants for Samsung Exynos8895 ACPM clock controller.
++ */
++
++#ifndef _DT_BINDINGS_CLOCK_SAMSUNG_EXYNOS8895_ACPM_H
++#define _DT_BINDINGS_CLOCK_SAMSUNG_EXYNOS8895_ACPM_H
++
++#define EXYNOS8895_CLK_ACPM_DVFS_MIF		0
++#define EXYNOS8895_CLK_ACPM_DVFS_INT		1
++#define EXYNOS8895_CLK_ACPM_DVFS_CPUCL0		2
++#define EXYNOS8895_CLK_ACPM_DVFS_CPUCL1		3
++#define EXYNOS8895_CLK_ACPM_DVFS_G3D		4
++#define EXYNOS8895_CLK_ACPM_DVFS_INTCAM		5
++#define EXYNOS8895_CLK_ACPM_DVFS_CAM		6
++#define EXYNOS8895_CLK_ACPM_DVFS_DISP		7
++#define EXYNOS8895_CLK_ACPM_DVFS_G3DM		8
++#define EXYNOS8895_CLK_ACPM_DVFS_CP		9
++
++#endif /* _DT_BINDINGS_CLOCK_SAMSUNG_EXYNOS8895_ACPM_H */

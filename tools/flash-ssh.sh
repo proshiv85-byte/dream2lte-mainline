@@ -12,6 +12,9 @@ SUM=$(sha256sum out/boot-mainline.img | cut -d' ' -f1)
 SIZE=$(stat -c %s out/boot-mainline.img)
 KREL=$(ls out/modules/lib/modules/)
 tar -C out/modules/lib -c modules/$KREL | $PH "rm -rf /usr/lib/modules/$KREL && tar -C /usr/lib -x && depmod $KREL && echo modules $KREL installed"
+for f in out/firmware/*.fw; do
+	[ -f "$f" ] && $PH "mkdir -p /usr/lib/firmware && cat > /usr/lib/firmware/${f##*/}" < "$f" && echo "firmware ${f##*/} installed"
+done
 $PH "cat > /tmp/b.img" < out/boot-mainline.img
 $PH "dd if=/tmp/b.img of=/dev/sda7 bs=1M conv=fsync 2>/dev/null; [ \$(head -c $SIZE /dev/sda7 | sha256sum | cut -c1-64) = $SUM ] && echo verified"
 [ "${NOREBOOT:-0}" = 1 ] && exit 0

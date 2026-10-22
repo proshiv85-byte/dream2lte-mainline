@@ -15,7 +15,9 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 
 | Hardware | State |
 |---|---|
-| CPUs (8 cores), RAM (3.5 GB usable) | works, fixed bootloader clock (no cpufreq yet) |
+| CPUs (8 cores), RAM (3.5 GB usable) | works |
+| CPU frequency scaling | works: A53 455–1690 MHz, Mongoose 741–2314 MHz, via the APM firmware (needs the DVFS plugin, see below) |
+| Thermal | works: CPU, GPU and ISP sensors, CPUs throttle at 80 °C (big) / 90 °C (little), shutdown at 115 °C |
 | Display | works through simple-framebuffer (no brightness, no screen off) |
 | Touchscreen (STM FTS8) | works |
 | Buttons | works |
@@ -26,7 +28,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | RTC | works (S2MPS17 over SPEEDY) |
 | Reboot, reboot to recovery | works |
 | Power off | wired up, not tested yet |
-| WiFi, Bluetooth, audio, GPU, cameras, modem, USB 3 / host, thermal, cpufreq, suspend | not supported yet |
+| WiFi, Bluetooth, audio, GPU, cameras, modem, USB 3 / host, suspend | not supported yet |
 
 ## What's in the patches
 
@@ -40,6 +42,11 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 - S2MPS17 PMIC: touchscreen regulators and RTC
 - MAX77865: charger state and USB routing of the MUIC
 - `stmfts`: FTS8 variant (`st,stmfts8`)
+- ACPM (the APM power-management firmware): loading of the firmware plugins
+  the 8895 expects from the kernel, DVFS clocks for `clk-acpm`, mailbox and
+  OPP tables, so `cpufreq-dt` drives the CPU clusters
+- `exynos8895_tmu`: temperature sensors of the 8895 TMU, thermal zones with
+  cpufreq cooling
 
 The vendor kernel (Samsung 4.4) was used as the reference for the hardware
 sequences; the code was written for mainline with an AI assistant (Claude),
@@ -74,6 +81,22 @@ tools/mkbootimg.py --kernel shim/shim.bin --dt backup/dt-4.4.img -o out/boot-mai
 ```
 
 Install `out/modules/lib/modules/<version>` to `/usr/lib/modules/` on the phone.
+
+### CPU frequency firmware
+
+CPU clocks and voltages are set by the APM firmware, which only accepts
+requests after the kernel has loaded its DVFS plugin,
+`exynos8895_acpm_dvfs.fw`. The plugin is Samsung's and is not included here.
+It ships (as `firmware/exynos8895_acpm_dvfs.fw.ihex`) in Samsung's kernel
+source releases for the S8/S8+ (opensource.samsung.com):
+
+```sh
+tools/get-firmware.sh /path/to/samsung/kernel/source   # -> out/firmware/
+```
+
+Install it as `/usr/lib/firmware/exynos8895_acpm_dvfs.fw` (`tools/flash-ssh.sh`
+does that). Without it the CPUs stay at the bootloader's clocks, about half
+of their top speed.
 
 ## Flashing
 
