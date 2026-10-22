@@ -17,6 +17,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 |---|---|
 | CPUs (8 cores), RAM (3.5 GB usable) | works |
 | CPU frequency scaling | works: A53 455–1690 MHz, Mongoose 741–2314 MHz, via the APM firmware (needs the DVFS plugin, see below) |
+| WiFi (BCM4361) | works: scan and connect, 2.4 + 5 GHz, via `brcmfmac` (needs the Samsung firmware, see below) |
 | Thermal | works: CPU, GPU and ISP sensors, CPUs throttle at 80 °C (big) / 90 °C (little), shutdown at 115 °C |
 | Display | works through simple-framebuffer (no brightness, no screen off) |
 | Touchscreen (STM FTS8) | works |
@@ -28,7 +29,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | RTC | works (S2MPS17 over SPEEDY) |
 | Reboot, reboot to recovery | works |
 | Power off | wired up, not tested yet |
-| WiFi, Bluetooth, audio, GPU, cameras, modem, USB 3 / host, suspend | not supported yet |
+| Bluetooth, audio, GPU, cameras, modem, USB 3 / host, suspend | not supported yet |
 
 ## What's in the patches
 
@@ -45,6 +46,10 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 - ACPM (the APM power-management firmware): loading of the firmware plugins
   the 8895 expects from the kernel, DVFS clocks for `clk-acpm`, mailbox and
   OPP tables, so `cpufreq-dt` drives the CPU clusters
+- PCIe: Exynos8895 host driver (`pcie-exynos8895`, DesignWare based) for the
+  WiFi chip; its outbound window is only 4 MiB, so the chip's 4 MiB RAM BAR
+  is clipped and the register BAR moved above it on the bus
+- `brcmfmac`: BCM4361 support (PCIe, Samsung's firmware)
 - `exynos8895_tmu`: temperature sensors of the 8895 TMU, thermal zones with
   cpufreq cooling
 
@@ -97,6 +102,22 @@ tools/get-firmware.sh /path/to/samsung/kernel/source   # -> out/firmware/
 Install it as `/usr/lib/firmware/exynos8895_acpm_dvfs.fw` (`tools/flash-ssh.sh`
 does that). Without it the CPUs stay at the bootloader's clocks, about half
 of their top speed.
+
+### WiFi firmware
+
+The WiFi firmware is Samsung's and comes from the phone's vendor partition
+(`/vendor/etc/wifi`). Which files fit depends on the WiFi module; the vendor
+kernel prints its choice (`dhd_bus_download_firmware: firmware path=...`).
+For the SM-G955F used here it is the B0 firmware with the `r02j` NVRAM:
+
+```sh
+cd /usr/lib/firmware/brcm
+cp /vendor/etc/wifi/bcmdhd_sta.bin_b0    brcmfmac4361-pcie.bin
+cp /vendor/etc/wifi/nvram.txt_r02j_b0    brcmfmac4361-pcie.txt
+cp /vendor/etc/wifi/bcmdhd_clm.blob      brcmfmac4361-pcie.clm_blob
+```
+
+The `_b2` firmware loads but never starts on this module.
 
 ## Flashing
 

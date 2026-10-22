@@ -1,0 +1,704 @@
+From e4b7e17ed965a5166d56ecfdc2967b34082a74c4 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Thu, 22 Oct 2026 19:01:02 +0300
+Subject: [PATCH 7/7] WIP: Exynos8895 PCIe host + BCM4361 WiFi
+
+New pcie-exynos8895 DWC glue: PHY/reset sequence from the vendor kernel,
+WLAN_REG_ON as vpcie3v3 regulator, PERST# via reset-gpios, INTx only.
+The 4 MiB outbound window cannot hold the 4 MiB TCM BAR plus the
+register BAR, so an oversized BAR is clipped to a prefetchable window
+and the rest is translated to bus addresses above its decode range
+(the vendor kernel ends up with the same layout).
+
+brcmfmac: BCM4361 (14e4:441f) ids, RAM base, firmware entry with the
+random seed. Works with Samsung's 13.38.64 B0 firmware.
+
+DT: PCIe channel 0 on the dream2lte, WLAN enable regulator and pins.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../boot/dts/exynos/exynos8895-dream2lte.dts  |  45 ++
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    |  38 ++
+ .../broadcom/brcm80211/brcmfmac/chip.c        |   1 +
+ .../broadcom/brcm80211/brcmfmac/pcie.c        |   3 +
+ .../broadcom/brcm80211/include/brcm_hw_ids.h  |   2 +
+ drivers/pci/controller/dwc/Kconfig            |  11 +
+ drivers/pci/controller/dwc/Makefile           |   1 +
+ drivers/pci/controller/dwc/pcie-exynos8895.c  | 458 ++++++++++++++++++
+ 8 files changed, 559 insertions(+)
+ create mode 100644 drivers/pci/controller/dwc/pcie-exynos8895.c
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+index 672ac1207..3bed252cf 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -130,6 +130,19 @@ ufs_vcc: regulator-ufs-vcc {
+ 		regulator-always-on;
+ 	};
+ 
++	wlan_pwr: regulator-wlan {
++		compatible = "regulator-fixed";
++		regulator-name = "wlan-en";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		gpio = <&gpj1 3 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		/* the vendor driver waits this long after WLAN_REG_ON */
++		startup-delay-us = <200000>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&wlan_en>;
++	};
++
+ 	gpio-keys {
+ 		compatible = "gpio-keys";
+ 
+@@ -206,6 +219,15 @@ &oscclk {
+ 	clock-frequency = <26000000>;
+ };
+ 
++&pcie_wifi0 {
++	reset-gpios = <&gpj1 2 GPIO_ACTIVE_LOW>;
++	vpcie3v3-supply = <&wlan_pwr>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&pcie0_clkreq &pcie0_perst>;
++
++	status = "okay";
++};
++
+ &pinctrl_alive {
+ 	key_power: key-power-pins {
+ 		samsung,pins = "gpa2-4";
+@@ -332,3 +354,26 @@ reboot-mode {
+ 		mode-recovery = <0x12345674>;
+ 	};
+ };
++
++&pinctrl_fsys1 {
++	pcie0_clkreq: pcie0-clkreq-pins {
++		samsung,pins = "gpj1-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++		samsung,pin-drv = <3>;
++	};
++
++	pcie0_perst: pcie0-perst-pins {
++		samsung,pins = "gpj1-2";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <3>;
++	};
++
++	wlan_en: wlan-en-pins {
++		samsung,pins = "gpj1-3";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <3>;
++	};
++};
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index 4b9b697a7..7085df6e4 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -1745,6 +1745,44 @@ mmc: mmc@11500000 {
+ 			status = "disabled";
+ 		};
+ 
++		pcie_wifi0: pcie@116a0000 {
++			compatible = "samsung,exynos8895-pcie";
++			reg = <0x116a0000 0x1000>,
++			      <0x116c0000 0x200>,
++			      <0x116d0000 0x1000>,
++			      <0x11700000 0x1000>,
++			      <0x11aff000 0x1000>;
++			reg-names = "elbi", "pcs", "phy", "dbi", "config";
++			clocks = <&cmu_fsys1 CLK_GOUT_FSYS1_PCIE_DBI_ACLK_0>,
++				 <&cmu_fsys1 CLK_GOUT_FSYS1_PCIE_MSTR_ACLK_0>,
++				 <&cmu_fsys1 CLK_GOUT_FSYS1_PCIE_SLV_ACLK_0>,
++				 <&cmu_fsys1 CLK_GOUT_FSYS1_PCIE_PCIE_SUB_CTRL_INST_0_I_DRIVER_APB_CLK>,
++				 <&cmu_fsys1 CLK_GOUT_FSYS1_PCIE_PIPE2_DIGITAL_X2_WRAP_INST_0_I_APB_PCLK_SCL>,
++				 <&cmu_fsys1 CLK_GOUT_FSYS1_PCIE_IEEE1500_WRAPPER_FOR_PCIE_PHY_LC_X2_INST_0_I_SCL_APB_PCLK>,
++				 <&cmu_fsys1 CLK_GOUT_FSYS1_PCIE_PHY_REF_CLK_IN>;
++			interrupts = <GIC_SPI 345 IRQ_TYPE_LEVEL_HIGH>;
++			#interrupt-cells = <1>;
++			interrupt-map-mask = <0 0 0 0>;
++			interrupt-map = <0 0 0 0 &gic GIC_SPI 345 IRQ_TYPE_LEVEL_HIGH>;
++			samsung,pmu-syscon = <&pmu_system_controller>;
++			samsung,sysreg = <&syscon_fsys1 0x1044>;
++			#address-cells = <3>;
++			#size-cells = <2>;
++			device_type = "pci";
++			bus-range = <0x00 0xff>;
++			/*
++			 * The slave window of this channel is 0x11800000-0x11bfffff.
++			 * The prefetchable part takes BARs that don't fit and are
++			 * clipped by the driver, the rest is moved up on the bus.
++			 */
++			ranges = <0xc2000000 0x0 0x11800000 0x11800000 0x0 0x2ff000>,
++				 <0x82000000 0x0 0x11c00000 0x11b00000 0x0 0x100000>;
++			num-lanes = <1>;
++			max-link-speed = <1>;
++
++			status = "disabled";
++		};
++
+ 		pinctrl_abox: pinctrl@13e60000 {
+ 			compatible = "samsung,exynos8895-pinctrl";
+ 			reg = <0x13e60000 0x1000>;
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c
+index 4adc0d0e4..2ab617295 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c
+@@ -738,6 +738,7 @@ static u32 brcmf_chip_tcm_rambase(struct brcmf_chip_priv *ci)
+ 	case BRCM_CC_4364_CHIP_ID:
+ 	case CY_CC_4373_CHIP_ID:
+ 		return 0x160000;
++	case BRCM_CC_4361_CHIP_ID:
+ 	case BRCM_CC_43751_CHIP_ID:
+ 	case BRCM_CC_43752_CHIP_ID:
+ 	case BRCM_CC_4377_CHIP_ID:
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index 55f4d7b97..b226faa8e 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -59,6 +59,7 @@ BRCMF_FW_CLM_DEF(43570, "brcmfmac43570-pcie");
+ BRCMF_FW_DEF(4358, "brcmfmac4358-pcie");
+ BRCMF_FW_DEF(4359, "brcmfmac4359-pcie");
+ BRCMF_FW_DEF(4359C, "brcmfmac4359c-pcie");
++BRCMF_FW_CLM_DEF(4361, "brcmfmac4361-pcie");
+ BRCMF_FW_CLM_DEF(4364B2, "brcmfmac4364b2-pcie");
+ BRCMF_FW_CLM_DEF(4364B3, "brcmfmac4364b3-pcie");
+ BRCMF_FW_DEF(4365B, "brcmfmac4365b-pcie");
+@@ -98,6 +99,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
+ 	BRCMF_FW_ENTRY(BRCM_CC_4358_CHIP_ID, 0xFFFFFFFF, 4358),
+ 	BRCMF_FW_ENTRY(BRCM_CC_4359_CHIP_ID, 0x000001FF, 4359),
+ 	BRCMF_FW_ENTRY(BRCM_CC_4359_CHIP_ID, 0xFFFFFE00, 4359C),
++	BRCMF_FW_ENTRY(BRCM_CC_4361_CHIP_ID, 0xFFFFFFFF, 4361),
+ 	BRCMF_FW_ENTRY(BRCM_CC_4364_CHIP_ID, 0x0000000F, 4364B2), /* 3 */
+ 	BRCMF_FW_ENTRY(BRCM_CC_4364_CHIP_ID, 0xFFFFFFF0, 4364B3), /* 4 */
+ 	BRCMF_FW_ENTRY(BRCM_CC_4365_CHIP_ID, 0x0000000F, 4365B),
+@@ -2747,6 +2749,7 @@ static const struct pci_device_id brcmf_pcie_devid_table[] = {
+ 	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_2G_DEVICE_ID, WCC),
+ 	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_5G_DEVICE_ID, WCC),
+ 	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_RAW_DEVICE_ID, WCC),
++	BRCMF_PCIE_DEVICE(BRCM_PCIE_4361_DEVICE_ID, WCC_SEED),
+ 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4364_DEVICE_ID, WCC_SEED),
+ 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4365_DEVICE_ID, BCA),
+ 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4365_2G_DEVICE_ID, BCA),
+diff --git a/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h b/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h
+index df3b67ba4..b800cbfde 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h
++++ b/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h
+@@ -46,6 +46,7 @@
+ #define BRCM_CC_4358_CHIP_ID		0x4358
+ #define BRCM_CC_4359_CHIP_ID		0x4359
+ #define BRCM_CC_43602_CHIP_ID		43602
++#define BRCM_CC_4361_CHIP_ID		0x4361
+ #define BRCM_CC_4364_CHIP_ID		0x4364
+ #define BRCM_CC_4365_CHIP_ID		0x4365
+ #define BRCM_CC_4366_CHIP_ID		0x4366
+@@ -86,6 +87,7 @@
+ #define BRCM_PCIE_43602_2G_DEVICE_ID	0x43bb
+ #define BRCM_PCIE_43602_5G_DEVICE_ID	0x43bc
+ #define BRCM_PCIE_43602_RAW_DEVICE_ID	43602
++#define BRCM_PCIE_4361_DEVICE_ID	0x441f
+ #define BRCM_PCIE_4364_DEVICE_ID	0x4464
+ #define BRCM_PCIE_4365_DEVICE_ID	0x43ca
+ #define BRCM_PCIE_4365_2G_DEVICE_ID	0x43cb
+diff --git a/drivers/pci/controller/dwc/Kconfig b/drivers/pci/controller/dwc/Kconfig
+index dcfbe7e22..a65056783 100644
+--- a/drivers/pci/controller/dwc/Kconfig
++++ b/drivers/pci/controller/dwc/Kconfig
+@@ -403,6 +403,17 @@ config PCI_EXYNOS
+ 	  hardware and therefore the driver re-uses the DesignWare core
+ 	  functions to implement the driver.
+ 
++config PCIE_EXYNOS8895
++	tristate "Samsung Exynos8895 PCIe controller"
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	depends on PCI_MSI
++	select PCIE_DW_HOST
++	help
++	  Enables support for the PCIe controller of the Samsung Exynos8895
++	  SoC in host mode, which connects the WLAN chip on Galaxy S8 phones.
++	  The controller is based on the DesignWare hardware and the driver
++	  re-uses the DesignWare core functions.
++
+ config PCIE_FU740
+ 	bool "SiFive FU740 PCIe controller"
+ 	depends on PCI_MSI
+diff --git a/drivers/pci/controller/dwc/Makefile b/drivers/pci/controller/dwc/Makefile
+index d4f88cfc6..2df4dbb7d 100644
+--- a/drivers/pci/controller/dwc/Makefile
++++ b/drivers/pci/controller/dwc/Makefile
+@@ -9,6 +9,7 @@ obj-$(CONFIG_PCIE_ANDES_QILAI) += pcie-andes-qilai.o
+ obj-$(CONFIG_PCIE_ESWIN) += pcie-eswin.o
+ obj-$(CONFIG_PCI_DRA7XX) += pci-dra7xx.o
+ obj-$(CONFIG_PCI_EXYNOS) += pci-exynos.o
++obj-$(CONFIG_PCIE_EXYNOS8895) += pcie-exynos8895.o
+ obj-$(CONFIG_PCIE_FU740) += pcie-fu740.o
+ obj-$(CONFIG_PCI_IMX6) += pci-imx6.o
+ obj-$(CONFIG_PCIE_NXP_S32G) += pcie-nxp-s32g.o
+diff --git a/drivers/pci/controller/dwc/pcie-exynos8895.c b/drivers/pci/controller/dwc/pcie-exynos8895.c
+new file mode 100644
+index 000000000..43172b267
+--- /dev/null
++++ b/drivers/pci/controller/dwc/pcie-exynos8895.c
+@@ -0,0 +1,458 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * PCIe host controller driver for the Samsung Exynos8895 SoC
++ *
++ * The register sequences follow the Exynos8895 vendor kernel. The PHY is
++ * programmed from here, its tables only make sense for this controller.
++ */
++
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/interrupt.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/pci.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++
++#include "pcie-designware.h"
++
++/* ELBI registers */
++#define PCIE_IRQ_PULSE			0x000
++#define IRQ_INTA_ASSERT			BIT(0)
++#define IRQ_INTB_ASSERT			BIT(2)
++#define IRQ_INTC_ASSERT			BIT(4)
++#define IRQ_INTD_ASSERT			BIT(6)
++#define PCIE_IRQ_LEVEL			0x004
++#define PCIE_IRQ_SPECIAL		0x008
++#define PCIE_IRQ_EN_PULSE		0x00c
++#define PCIE_IRQ_EN_LEVEL		0x010
++#define PCIE_IRQ_EN_SPECIAL		0x014
++#define PCIE_SW_WAKE			0x018
++#define PCIE_BUS_EN			BIT(1)
++#define PCIE_APP_LTSSM_ENABLE		0x02c
++#define PCIE_IRQ_TOE_EN_PULSE2		0x034
++#define PCIE_IRQ_TOE_EN_LEVEL		0x038
++#define PCIE_L1_BUG_FIX_ENABLE		0x038
++#define PCIE_ELBI_RDLH_LINKUP		0x074
++#define PCIE_LTSSM_STATE		GENMASK(4, 0)
++#define PCIE_LTSSM_L0			0x11
++#define PCIE_APP_REQ_EXIT_L1_MODE	0x0f4
++#define APP_REQ_EXIT_L1_MODE		BIT(0)
++#define L1_REQ_NAK_CONTROL_MASTER	BIT(4)
++#define PCIE_LINKDOWN_RST_CTRL_SEL	0x1b8
++#define PCIE_LINKDOWN_RST_MANUAL	BIT(1)
++#define PCIE_SOFT_CORE_RESET		0x1d0
++#define PCIE_PHY_GLOBAL_RESET		0x288
++#define PCIE_PHY_COMMON_RESET		0x28c
++#define PCIE_PHY_MAC_RESET		0x290
++#define PCIE_QCH_SEL			0x2c8
++#define CLOCK_GATING_MASK		GENMASK(11, 0)
++
++/* DBI port logic registers */
++#define PCIE_AUX_CLK_FREQ		0xb40
++#define PCIE_AUX_CLK_FREQ_26MHZ		0x1a
++#define PCIE_L1_SUBSTATES		0xb44
++#define PCIE_L1_SUBSTATES_VAL		0xea
++
++/* PHY PCS registers */
++#define PCIE_PCS_TIMEOUT_L1SS		0x00c
++#define PCIE_PCS_RX_ELECIDLE		0x0ec
++#define PCIE_PCS_RX_ELECIDLE_MASK	BIT(3)
++#define PCIE_PCS_TX_LATENCY		0x0f8
++#define PCIE_PCS_REFCLK_OUT0		0x100
++#define PCIE_PCS_REFCLK_OUT1		0x104
++
++/* SYSREG (FSYS1), relative to the PCIe channel's block */
++#define PCIE_SYSREG_CTRL		0x000
++#define PCIE_SYSREG_PHY_CONTROL		0x00c
++#define BIFURCATION_MODE_DISABLE	BIT(16)
++#define LINK0_ENABLE			BIT(14)
++#define PCS_LANE0_ENABLE		BIT(12)
++
++/* PMU */
++#define PMU_PCIE_PHY_CONTROL		0x71c
++#define PMU_PCIE_PHY_ENABLE		BIT(0)
++
++/* PHY register index, 4-byte stride */
++#define PHY_REG(n)			((n) * 4)
++
++/* 26 MHz reference, Gen1, channel 0 */
++static const u8 exynos8895_phy_cmn[] = {
++	0x01, 0xe1, 0x05, 0x00, 0x88, 0x88, 0x88, 0x04,
++	0x31, 0x45, 0x65, 0x24, 0x33, 0x08, 0xa4, 0xfc,
++	0xc6, 0x05, 0xe6, 0x80, 0x00, 0x00, 0x00, 0x00,
++	0x60, 0x11, 0x00, 0x90, 0x10, 0x04, 0x4e, 0x8e,
++	0xc0, 0xff, 0x9b, 0x52, 0x22, 0x73, 0x47, 0x8c,
++	0x40, 0x00, 0x22, 0xff, 0xff, 0xff, 0x00, 0x80,
++};
++
++static const u8 exynos8895_phy_trsv[] = {
++	/* lane 0 */
++	0x31, 0x40, 0x37, 0x99, 0x85, 0x00, 0xc0, 0xff,
++	0xff, 0x3f, 0x8c, 0xc8, 0x02, 0x01, 0x88, 0x80,
++	0x06, 0x90, 0x68, 0x66, 0x09, 0x31, 0x42, 0x44,
++	0xc6, 0x18, 0x03, 0x33, 0x58, 0xe7, 0x20, 0x22,
++	0x80, 0x38, 0x05, 0x85, 0x00, 0x00, 0x00, 0x7e,
++	0x00, 0x00, 0x55, 0x15, 0xac, 0xaa, 0x3e, 0x00,
++	0x00, 0x00, 0x00, 0x3f, 0x00, 0xff, 0xff, 0xff,
++	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
++	0x05, 0x85, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00,
++	/* lane 1 */
++	0x81, 0x40, 0x37, 0x99, 0x85, 0x00, 0xc0, 0xff,
++	0xff, 0x3f, 0x8c, 0xc8, 0x02, 0x01, 0x88, 0x80,
++	0x06, 0x90, 0x68, 0x66, 0x09, 0x31, 0x42, 0x44,
++	0xc6, 0x18, 0x03, 0x33, 0x58, 0xe7, 0x20, 0x22,
++	0x80, 0x38, 0x05, 0x85, 0x00, 0x00, 0x00, 0x7e,
++	0x00, 0x00, 0x55, 0x15, 0xac, 0xaa, 0x3e, 0x00,
++	0x00, 0x00, 0x00, 0x3f, 0x00, 0xff, 0xff, 0xff,
++	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
++	0x05, 0x85, 0xff, 0x00,
++};
++
++struct exynos8895_pcie {
++	struct dw_pcie pci;
++	void __iomem *phy_base;
++	void __iomem *pcs_base;
++	struct regmap *sysreg;
++	unsigned int sysreg_off;
++	struct regmap *pmu;
++	struct clk_bulk_data *clks;
++	int num_clks;
++	struct regulator *vpcie3v3;
++	struct gpio_desc *perst;
++};
++
++#define to_exynos8895_pcie(x)	dev_get_drvdata((x)->dev)
++
++static void exynos8895_pcie_phy_load(struct exynos8895_pcie *ep)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(exynos8895_phy_cmn); i++)
++		writel(exynos8895_phy_cmn[i], ep->phy_base + PHY_REG(i));
++
++	for (i = 0; i < ARRAY_SIZE(exynos8895_phy_trsv); i++)
++		writel(exynos8895_phy_trsv[i], ep->phy_base + PHY_REG(0x30 + i));
++}
++
++static void exynos8895_pcie_phy_init(struct exynos8895_pcie *ep)
++{
++	void __iomem *elbi = ep->pci.elbi_base;
++	u32 val;
++
++	regmap_clear_bits(ep->sysreg, ep->sysreg_off + PCIE_SYSREG_CTRL, BIT(1));
++	regmap_update_bits(ep->sysreg, ep->sysreg_off + PCIE_SYSREG_PHY_CONTROL,
++			   GENMASK(7, 1), 0x3 << 2);
++
++	writel(0, elbi + PCIE_PHY_MAC_RESET);
++	udelay(10);
++	writel(0, elbi + PCIE_PHY_COMMON_RESET);
++	udelay(10);
++	writel(1, elbi + PCIE_PHY_GLOBAL_RESET);
++	udelay(10);
++	writel(0, elbi + PCIE_PHY_GLOBAL_RESET);
++	udelay(10);
++	writel(1, elbi + PCIE_PHY_GLOBAL_RESET);
++	udelay(10);
++
++	exynos8895_pcie_phy_load(ep);
++
++	/* TX amplitude */
++	writel(0x14, ep->phy_base + PHY_REG(0x5c));
++
++	writel(0x70, ep->pcs_base + PCIE_PCS_TX_LATENCY);
++	writel(0x87, ep->pcs_base + PCIE_PCS_REFCLK_OUT0);
++	writel(0x50, ep->pcs_base + PCIE_PCS_REFCLK_OUT1);
++
++	val = readl(ep->pcs_base + PCIE_PCS_TIMEOUT_L1SS);
++	val &= ~BIT(1);
++	val |= BIT(4);
++	writel(val, ep->pcs_base + PCIE_PCS_TIMEOUT_L1SS);
++
++	writel(1, elbi + PCIE_PHY_MAC_RESET);
++	udelay(10);
++	writel(1, elbi + PCIE_PHY_COMMON_RESET);
++	udelay(10);
++
++	/* the vendor code loads the tables a second time after the resets */
++	exynos8895_pcie_phy_load(ep);
++
++	val = readl(elbi + PCIE_SW_WAKE);
++	writel(val & ~PCIE_BUS_EN, elbi + PCIE_SW_WAKE);
++}
++
++static void exynos8895_pcie_rx_elecidle(struct exynos8895_pcie *ep, bool ignore)
++{
++	u32 val = readl(ep->pcs_base + PCIE_PCS_RX_ELECIDLE);
++
++	if (ignore)
++		val |= PCIE_PCS_RX_ELECIDLE_MASK;
++	else
++		val &= ~PCIE_PCS_RX_ELECIDLE_MASK;
++	writel(val, ep->pcs_base + PCIE_PCS_RX_ELECIDLE);
++}
++
++static irqreturn_t exynos8895_pcie_irq_handler(int irq, void *arg)
++{
++	struct exynos8895_pcie *ep = arg;
++	void __iomem *elbi = ep->pci.elbi_base;
++
++	writel(readl(elbi + PCIE_IRQ_PULSE), elbi + PCIE_IRQ_PULSE);
++	writel(readl(elbi + PCIE_IRQ_LEVEL), elbi + PCIE_IRQ_LEVEL);
++	writel(readl(elbi + PCIE_IRQ_SPECIAL), elbi + PCIE_IRQ_SPECIAL);
++
++	return IRQ_HANDLED;
++}
++
++static void exynos8895_pcie_enable_irqs(struct exynos8895_pcie *ep)
++{
++	void __iomem *elbi = ep->pci.elbi_base;
++
++	writel(IRQ_INTA_ASSERT | IRQ_INTB_ASSERT | IRQ_INTC_ASSERT |
++	       IRQ_INTD_ASSERT, elbi + PCIE_IRQ_EN_PULSE);
++	writel(0, elbi + PCIE_IRQ_TOE_EN_PULSE2);
++	writel(0, elbi + PCIE_IRQ_TOE_EN_LEVEL);
++	writel(0, elbi + PCIE_IRQ_EN_LEVEL);
++	writel(0, elbi + PCIE_IRQ_EN_SPECIAL);
++}
++
++static int exynos8895_pcie_host_init(struct dw_pcie_rp *pp)
++{
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct exynos8895_pcie *ep = to_exynos8895_pcie(pci);
++	void __iomem *elbi = pci->elbi_base;
++	u32 val;
++	int ret;
++
++	ret = regulator_enable(ep->vpcie3v3);
++	if (ret)
++		return ret;
++
++	regmap_update_bits(ep->pmu, PMU_PCIE_PHY_CONTROL, PMU_PCIE_PHY_ENABLE,
++			   PMU_PCIE_PHY_ENABLE);
++
++	/* PHY power down clear, channel 0 */
++	writel(0xc0, ep->phy_base + PHY_REG(0x20));
++	writel(0x7e, ep->phy_base + PHY_REG(0xa7));
++
++	exynos8895_pcie_rx_elecidle(ep, true);
++
++	writel(0, elbi + PCIE_SOFT_CORE_RESET);
++	udelay(20);
++	writel(1, elbi + PCIE_SOFT_CORE_RESET);
++
++	gpiod_set_value_cansleep(ep->perst, 0);
++	usleep_range(18000, 20000);
++
++	val = readl(elbi + PCIE_APP_REQ_EXIT_L1_MODE);
++	val |= APP_REQ_EXIT_L1_MODE | L1_REQ_NAK_CONTROL_MASTER;
++	writel(val, elbi + PCIE_APP_REQ_EXIT_L1_MODE);
++	writel(PCIE_LINKDOWN_RST_MANUAL, elbi + PCIE_LINKDOWN_RST_CTRL_SEL);
++
++	val = readl(elbi + PCIE_QCH_SEL);
++	writel(val & ~CLOCK_GATING_MASK, elbi + PCIE_QCH_SEL);
++
++	exynos8895_pcie_phy_init(ep);
++
++	writel(1, elbi + PCIE_L1_BUG_FIX_ENABLE);
++
++	dw_pcie_dbi_ro_wr_en(pci);
++	dw_pcie_writel_dbi(pci, PCIE_AUX_CLK_FREQ, PCIE_AUX_CLK_FREQ_26MHZ);
++	dw_pcie_writel_dbi(pci, PCIE_L1_SUBSTATES, PCIE_L1_SUBSTATES_VAL);
++	dw_pcie_dbi_ro_wr_dis(pci);
++
++	regmap_update_bits(ep->sysreg, ep->sysreg_off + PCIE_SYSREG_PHY_CONTROL,
++			   BIFURCATION_MODE_DISABLE | LINK0_ENABLE | PCS_LANE0_ENABLE,
++			   LINK0_ENABLE | PCS_LANE0_ENABLE);
++
++	exynos8895_pcie_enable_irqs(ep);
++
++	return 0;
++}
++
++static void exynos8895_pcie_host_deinit(struct dw_pcie_rp *pp)
++{
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct exynos8895_pcie *ep = to_exynos8895_pcie(pci);
++
++	gpiod_set_value_cansleep(ep->perst, 1);
++	regmap_update_bits(ep->pmu, PMU_PCIE_PHY_CONTROL, PMU_PCIE_PHY_ENABLE, 0);
++	regulator_disable(ep->vpcie3v3);
++}
++
++/* MSIs are not wired up yet, endpoints fall back to INTx */
++static int exynos8895_pcie_msi_init(struct dw_pcie_rp *pp)
++{
++	return 0;
++}
++
++static const struct dw_pcie_host_ops exynos8895_pcie_host_ops = {
++	.init = exynos8895_pcie_host_init,
++	.deinit = exynos8895_pcie_host_deinit,
++	.msi_init = exynos8895_pcie_msi_init,
++};
++
++static int exynos8895_pcie_start_link(struct dw_pcie *pci)
++{
++	struct exynos8895_pcie *ep = to_exynos8895_pcie(pci);
++
++	exynos8895_pcie_rx_elecidle(ep, false);
++	writel(1, pci->elbi_base + PCIE_APP_LTSSM_ENABLE);
++
++	return 0;
++}
++
++static void exynos8895_pcie_stop_link(struct dw_pcie *pci)
++{
++	writel(0, pci->elbi_base + PCIE_APP_LTSSM_ENABLE);
++}
++
++static bool exynos8895_pcie_link_up(struct dw_pcie *pci)
++{
++	u32 state = readl(pci->elbi_base + PCIE_ELBI_RDLH_LINKUP) &
++		    PCIE_LTSSM_STATE;
++
++	/* L0 up to the L1/L2 states */
++	return state >= 0x0d && state <= 0x14;
++}
++
++static const struct dw_pcie_ops exynos8895_dw_pcie_ops = {
++	.start_link = exynos8895_pcie_start_link,
++	.stop_link = exynos8895_pcie_stop_link,
++	.link_up = exynos8895_pcie_link_up,
++};
++
++static int exynos8895_pcie_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct exynos8895_pcie *ep;
++	int irq, ret;
++
++	ep = devm_kzalloc(dev, sizeof(*ep), GFP_KERNEL);
++	if (!ep)
++		return -ENOMEM;
++
++	ep->pci.dev = dev;
++	ep->pci.ops = &exynos8895_dw_pcie_ops;
++	ep->pci.pp.ops = &exynos8895_pcie_host_ops;
++
++	ep->phy_base = devm_platform_ioremap_resource_byname(pdev, "phy");
++	if (IS_ERR(ep->phy_base))
++		return PTR_ERR(ep->phy_base);
++
++	ep->pcs_base = devm_platform_ioremap_resource_byname(pdev, "pcs");
++	if (IS_ERR(ep->pcs_base))
++		return PTR_ERR(ep->pcs_base);
++
++	ep->sysreg = syscon_regmap_lookup_by_phandle_args(dev->of_node,
++							  "samsung,sysreg", 1,
++							  &ep->sysreg_off);
++	if (IS_ERR(ep->sysreg))
++		return dev_err_probe(dev, PTR_ERR(ep->sysreg), "no sysreg\n");
++
++	ep->pmu = syscon_regmap_lookup_by_phandle(dev->of_node,
++						  "samsung,pmu-syscon");
++	if (IS_ERR(ep->pmu))
++		return dev_err_probe(dev, PTR_ERR(ep->pmu), "no PMU syscon\n");
++
++	ep->num_clks = devm_clk_bulk_get_all_enabled(dev, &ep->clks);
++	if (ep->num_clks < 0)
++		return dev_err_probe(dev, ep->num_clks, "failed to get clocks\n");
++
++	ep->vpcie3v3 = devm_regulator_get(dev, "vpcie3v3");
++	if (IS_ERR(ep->vpcie3v3))
++		return PTR_ERR(ep->vpcie3v3);
++
++	ep->perst = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ep->perst))
++		return dev_err_probe(dev, PTR_ERR(ep->perst), "no PERST# gpio\n");
++
++	irq = platform_get_irq(pdev, 0);
++	if (irq < 0)
++		return irq;
++
++	platform_set_drvdata(pdev, ep);
++
++	ret = devm_request_irq(dev, irq, exynos8895_pcie_irq_handler,
++			       IRQF_SHARED, dev_name(dev), ep);
++	if (ret)
++		return ret;
++
++	return dw_pcie_host_init(&ep->pci.pp);
++}
++
++static struct platform_driver exynos8895_pcie_driver;
++
++/*
++ * The outbound window of this controller is 4 MiB including the config
++ * space, which is too small for the 4 MiB BAR of the WLAN chip next to its
++ * register BAR. A BAR that does not fit is clipped to the prefetchable
++ * window and fixed at its start, the device only uses the beginning of it.
++ * The other BARs go to the second window, which the iATU maps to bus
++ * addresses above the clipped BAR's real decode range.
++ */
++static void exynos8895_pcie_clip_bar(struct pci_dev *pdev)
++{
++	struct pci_host_bridge *bridge = pci_find_host_bridge(pdev->bus);
++	struct resource_entry *win = NULL, *entry;
++	struct pci_bus_region region;
++	struct resource *res;
++	int i;
++
++	if (!bridge->dev.parent || !bridge->dev.parent->driver ||
++	    bridge->dev.parent->driver != &exynos8895_pcie_driver.driver ||
++	    pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT)
++		return;
++
++	resource_list_for_each_entry(entry, &bridge->windows)
++		if (resource_type(entry->res) == IORESOURCE_MEM &&
++		    entry->res->flags & IORESOURCE_PREFETCH)
++			win = entry;
++	if (!win)
++		return;
++
++	for (i = 0; i < PCI_STD_NUM_BARS; i++) {
++		res = &pdev->resource[i];
++		if (resource_type(res) != IORESOURCE_MEM ||
++		    resource_size(res) <= resource_size(win->res))
++			continue;
++
++		pci_info(pdev, "BAR %d: clipping %pR to %pR\n", i, res, win->res);
++		res->start = win->res->start;
++		res->end = win->res->end;
++		res->flags |= IORESOURCE_PREFETCH | IORESOURCE_PCI_FIXED;
++
++		pcibios_resource_to_bus(pdev->bus, &region, res);
++		pci_write_config_dword(pdev, PCI_BASE_ADDRESS_0 + i * 4,
++				       lower_32_bits(region.start));
++		if (res->flags & IORESOURCE_MEM_64)
++			pci_write_config_dword(pdev, PCI_BASE_ADDRESS_0 + (i + 1) * 4,
++					       upper_32_bits(region.start));
++	}
++}
++DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, exynos8895_pcie_clip_bar);
++
++static const struct of_device_id exynos8895_pcie_of_match[] = {
++	{ .compatible = "samsung,exynos8895-pcie" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, exynos8895_pcie_of_match);
++
++static struct platform_driver exynos8895_pcie_driver = {
++	.probe = exynos8895_pcie_probe,
++	.driver = {
++		.name = "exynos8895-pcie",
++		.of_match_table = exynos8895_pcie_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++module_platform_driver(exynos8895_pcie_driver);
++
++MODULE_DESCRIPTION("Samsung Exynos8895 PCIe host controller driver");
++MODULE_LICENSE("GPL");
