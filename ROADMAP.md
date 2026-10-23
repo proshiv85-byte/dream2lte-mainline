@@ -9,8 +9,8 @@ already works.
 
 | # | Item | Why it matters | Effort | Notes |
 |---|---|---|---|---|
-| 1 | **Display brightness and screen off** | The panel is always on at the bootloader's brightness, which drains the battery. Without this there's no backlight control and no blanking. | M | DSI commands to the S6E3HA6 panel through the DSIM (0x12870000), as a backlight device + DPMS in the DECON driver. Bootloader's DSI setup is kept, so only command sending is needed. |
-| 2 | **Charger driver (MAX77865)** | It currently charges at whatever the bootloader set (~450 mA). Fast charging, charge current/limits, USB type detection (SDP/DCP) and "charging / full" status would need this. | M | MAX77865 on hsi2c: charger 0x69, MUIC 0x25. Mainline has max77693/max77843 drivers that are close relatives. |
+| 1 | ~~Display brightness and screen off~~ | **Done.** Brightness through the panel's AOR on the bootloader's gamma; the panel sleeps when the screen is off. | — | Follow-up: calibrated gamma curves (vendor computes them from the panel's MTP) for the full brightness range. |
+| 2 | ~~Charger driver (MAX77865)~~ | **Done.** Charger type detection, 0.5 / 1.5 / 2.1 A, battery temperature limits, charger watchdog. | — | Follow-ups: 9 V adaptive fast charging (AFC, through the MUIC), interrupts instead of the 5 s poll, keeping the charger watchdog fed during suspend. |
 | 3 | **Vibration motor** | Haptic feedback, notifications. | S–M | Likely the MAX77865 haptic block (PWM) or a GPIO-driven motor; check the vendor DT. |
 | 4 | **Notification LED** | Small, easy win. | S | Check the vendor DT for which chip drives it. |
 | 5 | **Bluetooth (BCM4361)** | Headphones, keyboards. Same chip as WiFi, BT side is on a UART. | M | `hci_bcm` over serdev + the Samsung `.hcd` patch firmware; needs the UART node, BT_REG_ON / wake GPIOs. |
@@ -50,6 +50,6 @@ already works.
 
 ## Suggested order
 
-1 → 2 → 6 → 5 → 7. Brightness/screen-off and the charger make it a usable
-daily device; they're also prerequisites for suspend, which is the biggest
-battery win.
+6 → 5 → 7. Brightness/screen-off and the charger are done; power off is a
+quick check, Bluetooth is the next useful feature, and suspend is the
+biggest battery win.

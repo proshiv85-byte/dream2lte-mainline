@@ -1,0 +1,889 @@
+From 6df15cad374aba361c366db755e0b233306d0795 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Fri, 23 Oct 2026 16:32:17 +0300
+Subject: [PATCH 16/16] WIP: dream2lte charger: cable type, current limits,
+ battery temperature
+
+MAX77865 charger:
+- the charger watchdog, enabled by the bootloader, was never cleared
+  and turned charging off ~95 s after the last clear: the phone ran
+  from the battery while plugged in. It is now cleared from the 5 s
+  poll (so charging still stops if the system hangs).
+- the charger type found by the MUIC's BC1.2 detection sets the input
+  limit and charge current, with the vendor kernel's values: SDP
+  500/500 mA, CDP 1500/1500 mA, DCP 1800 mA in / 2100 mA charge
+  (capped by the monitored battery's constant-charge-current-max).
+- battery temperature from the "battery-thermal" zone, with the vendor
+  kernel's ranges: below 0 C and from 50 C charging stops, below 15 C
+  800 mA, from 41 C 1250 mA and 4.15 V; with hysteresis. Without a
+  temperature, charging is limited to 500 mA.
+- float voltage and termination current from the monitored battery.
+- usb_type, health, charge_type, input_current_limit and
+  constant_charge_current (writable caps), charge_behaviour (auto /
+  inhibit-charge) properties.
+- settings are checked and restored on every poll.
+
+DT: ADC node (bus clock is a hardware auto-gated BUSC gate, not
+modelled, oscclk as a placeholder), NTC thermistors on ADC channels 4
+(battery), 3 (charger) and 1 (USB connector) through
+generic-adc-thermal with the vendor table, thermal zones with critical
+trips, simple-battery node (3500 mAh, 2.1 A, 4.35 V, 150 mA term).
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../boot/dts/exynos/exynos8895-dream2lte.dts  | 103 ++++
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    |  14 +
+ drivers/power/supply/max77865_charger.c       | 577 ++++++++++++++++--
+ 3 files changed, 633 insertions(+), 61 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+index 156bd8fca..1bdff0fb8 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -187,6 +187,108 @@ wink-key {
+ 			wakeup-source;
+ 		};
+ 	};
++
++	battery: battery {
++		compatible = "simple-battery";
++		device-chemistry = "lithium-ion";
++		charge-full-design-microamp-hours = <3500000>;
++		constant-charge-current-max-microamp = <2100000>;
++		constant-charge-voltage-max-microvolt = <4350000>;
++		charge-term-current-microamp = <150000>;
++	};
++
++	/* NTC thermistors read by the AP ADC, values from the vendor kernel */
++	battery_temp: thermal-sensor-battery {
++		compatible = "generic-adc-thermal";
++		#thermal-sensor-cells = <0>;
++		io-channels = <&adc 4>;
++		io-channel-names = "sensor-channel";
++		temperature-lookup-table = <
++			(-20000) 3686 (-15000) 3575 (-10000) 3445 (-5000) 3293
++			0 3122 5000 2932 10000 2726 15000 2512
++			20000 2291 25000 2048 30000 1811 35000 1586
++			40000 1378 45000 1189 50000 1021 55000 887
++			60000 769 65000 655 70000 558 75000 474
++			80000 404 85000 345 90000 294>;
++	};
++
++	/* next to the charger */
++	charger_temp: thermal-sensor-charger {
++		compatible = "generic-adc-thermal";
++		#thermal-sensor-cells = <0>;
++		io-channels = <&adc 3>;
++		io-channel-names = "sensor-channel";
++		temperature-lookup-table = <
++			(-20000) 3686 (-15000) 3575 (-10000) 3445 (-5000) 3293
++			0 3122 5000 2932 10000 2726 15000 2512
++			20000 2291 25000 2048 30000 1811 35000 1586
++			40000 1378 45000 1189 50000 1021 55000 887
++			60000 769 65000 655 70000 558 75000 474
++			80000 404 85000 345 90000 294>;
++	};
++
++	/* at the USB connector */
++	usb_temp: thermal-sensor-usb {
++		compatible = "generic-adc-thermal";
++		#thermal-sensor-cells = <0>;
++		io-channels = <&adc 1>;
++		io-channel-names = "sensor-channel";
++		temperature-lookup-table = <
++			(-20000) 3686 (-15000) 3575 (-10000) 3445 (-5000) 3293
++			0 3122 5000 2932 10000 2726 15000 2512
++			20000 2291 25000 2048 30000 1811 35000 1586
++			40000 1378 45000 1189 50000 1021 55000 887
++			60000 769 65000 655 70000 558 75000 474
++			80000 404 85000 345 90000 294>;
++	};
++
++	thermal-zones {
++		battery-thermal {
++			polling-delay-passive = <0>;
++			polling-delay = <10000>;
++			thermal-sensors = <&battery_temp>;
++
++			trips {
++				battery-crit {
++					temperature = <75000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++		};
++
++		charger-thermal {
++			polling-delay-passive = <0>;
++			polling-delay = <10000>;
++			thermal-sensors = <&charger_temp>;
++
++			trips {
++				charger-crit {
++					temperature = <90000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++		};
++
++		usb-thermal {
++			polling-delay-passive = <0>;
++			polling-delay = <10000>;
++			thermal-sensors = <&usb_temp>;
++
++			trips {
++				usb-crit {
++					temperature = <90000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++		};
++	};
++};
++
++&adc {
++	status = "okay";
+ };
+ 
+ &decon {
+@@ -254,6 +356,7 @@ fuel-gauge@36 {
+ 	charger: charger@69 {
+ 		compatible = "maxim,max77865-charger";
+ 		reg = <0x69>;
++		monitored-battery = <&battery>;
+ 	};
+ };
+ 
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index 5ed279eb4..435a069e8 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -1918,6 +1918,20 @@ speedy: speedy@15b50000 {
+ 			status = "disabled";
+ 		};
+ 
++		adc: adc@15b70000 {
++			compatible = "samsung,exynos8895-adc";
++			reg = <0x15b70000 0x100>;
++			interrupts = <GIC_SPI 104 IRQ_TYPE_LEVEL_HIGH>;
++			/*
++			 * The bus clock is a hardware auto-gated BUSC gate, not
++			 * modelled by the clock driver.
++			 */
++			clocks = <&oscclk>;
++			clock-names = "adc";
++			#io-channel-cells = <1>;
++			status = "disabled";
++		};
++
+ 		ap2apm_mailbox: mailbox@16440000 {
+ 			compatible = "samsung,exynos8895-mbox",
+ 				     "samsung,exynos850-mbox";
+diff --git a/drivers/power/supply/max77865_charger.c b/drivers/power/supply/max77865_charger.c
+index 477affaca..d5e3c2099 100644
+--- a/drivers/power/supply/max77865_charger.c
++++ b/drivers/power/supply/max77865_charger.c
+@@ -2,17 +2,27 @@
+ /*
+  * Charger of the Maxim MAX77865 PMIC (Samsung Galaxy S8/S8+)
+  *
+- * The charger runs autonomously with the settings left by the bootloader;
+- * this driver only reports its state. It also routes the USB data lines to
+- * the SoC with the MUIC of the same chip, which the bootloader leaves open.
++ * The input current limit and the charge current follow the charger type
++ * found by the BC1.2 detection of the MUIC in the same chip, with the
++ * values of the vendor kernel, and are reduced or charging is stopped
++ * outside the battery's temperature range (read from a thermal zone). The
++ * charger has a watchdog, enabled by the bootloader, that turns charging
++ * off unless it is cleared regularly: it is cleared from the poll work, so
++ * charging stops if the system stops running.
++ *
++ * The driver also routes the USB data lines to the SoC with the MUIC, which
++ * the bootloader leaves open. Adaptive fast charging (9 V) is not done.
+  */
+ 
+ #include <linux/bitfield.h>
+ #include <linux/i2c.h>
++#include <linux/minmax.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/power_supply.h>
+ #include <linux/regmap.h>
++#include <linux/thermal.h>
+ #include <linux/workqueue.h>
+ 
+ #define MAX77865_CHG_REG_DETAILS_00	0xb3
+@@ -20,21 +30,83 @@
+ #define MAX77865_CHGIN_VALID		0x3
+ #define MAX77865_CHG_REG_DETAILS_01	0xb4
+ #define MAX77865_CHG_DTLS		GENMASK(3, 0)
++#define MAX77865_CHG_REG_CNFG_00	0xb7
++#define MAX77865_CHG_CNFG_00_CHG	BIT(0)
++#define MAX77865_CHG_REG_CNFG_02	0xb9
++#define MAX77865_CHG_CC			GENMASK(5, 0)
++#define MAX77865_CHG_CC_STEP_UA		50000
++#define MAX77865_CHG_CC_MIN_UA		100000
++#define MAX77865_CHG_CC_MAX_UA		3150000
++#define MAX77865_CHG_REG_CNFG_03	0xba
++#define MAX77865_CHG_TO_ITH		GENMASK(2, 0)
++#define MAX77865_CHG_TO_ITH_MIN_UA	150000
++#define MAX77865_CHG_TO_ITH_STEP_UA	50000
++#define MAX77865_CHG_TO_ITH_MAX_UA	500000
++#define MAX77865_CHG_REG_CNFG_04	0xbb
++#define MAX77865_CHG_CV_PRM		GENMASK(5, 0)
++#define MAX77865_CHG_CV_MIN_UV		4050000
++#define MAX77865_CHG_CV_STEP_UV		12500
++#define MAX77865_CHG_CV_MAX_UV		4500000
++#define MAX77865_CHG_REG_CNFG_06	0xbd
++#define MAX77865_CHG_WDTCLR		GENMASK(1, 0)
++#define MAX77865_CHG_WDTCLR_CLEAR	0x1
++#define MAX77865_CHG_REG_CNFG_09	0xc0
++#define MAX77865_CHG_CHGIN_ILIM		GENMASK(6, 0)
++#define MAX77865_CHG_CHGIN_ILIM_STEP_UA	25000
++#define MAX77865_CHG_CHGIN_ILIM_MIN_UA	100000
++#define MAX77865_CHG_CHGIN_ILIM_MAX_UA	3175000
+ 
+ #define MAX77865_MUIC_ADDR		0x25
++#define MAX77865_MUIC_REG_STATUS1_BC	0x0d
++#define MAX77865_MUIC_VBVOLT		BIT(7)
++#define MAX77865_MUIC_CHGDETRUN		BIT(6)
++#define MAX77865_MUIC_CHGTYP		GENMASK(1, 0)
++#define MAX77865_MUIC_CHGTYP_SDP	0x1
++#define MAX77865_MUIC_CHGTYP_CDP	0x2
++#define MAX77865_MUIC_CHGTYP_DCP	0x3
+ #define MAX77865_MUIC_REG_CONTROL1	0x19
+ /* D+ and D- to the AP USB PHY, ID open, BC comparator off */
+ #define MAX77865_MUIC_COM_USB_AP	0x89
+ 
++/* the charger watchdog expires after about 95 s */
+ #define MAX77865_POLL_INTERVAL		(5 * HZ)
+ 
++/* battery temperature ranges of the vendor kernel, in milli-Celsius */
++#define MAX77865_TEMP_COLD		0
++#define MAX77865_TEMP_COLD_RECOVER	5000
++#define MAX77865_TEMP_COOL		15000
++#define MAX77865_TEMP_COOL_RECOVER	20000
++#define MAX77865_TEMP_WARM		41000
++#define MAX77865_TEMP_WARM_RECOVER	39000
++#define MAX77865_TEMP_HOT		50000
++#define MAX77865_TEMP_HOT_RECOVER	45000
++#define MAX77865_COOL_CC_UA		800000
++#define MAX77865_WARM_CC_UA		1250000
++#define MAX77865_WARM_CV_UV		4150000
++/* without a battery temperature, charge as from a computer port */
++#define MAX77865_NO_TEMP_CC_UA		500000
++
+ struct max77865_charger {
+ 	struct device *dev;
+ 	struct regmap *regmap;
++	struct regmap *muic;
+ 	struct power_supply *psy;
++	struct thermal_zone_device *battery_tz;
+ 	struct delayed_work poll;
+-	int online;
++	/* protects everything below */
++	struct mutex lock;
++	enum power_supply_usb_type usb_type;
++	int health;
++	bool online;
+ 	int status;
++	bool inhibit;
++	int user_input_limit;
++	int user_cc;
++	int cc_max;
++	int cv_max;
++	int input_limit;
++	int cc;
++	int cv;
+ };
+ 
+ static const struct regmap_config max77865_regmap_config = {
+@@ -43,104 +115,433 @@ static const struct regmap_config max77865_regmap_config = {
+ 	.max_register = 0xff,
+ };
+ 
+-static int max77865_charger_read(struct max77865_charger *chg, int *online,
+-				 int *status)
++static int max77865_charger_status(struct max77865_charger *chg)
+ {
+-	unsigned int dtls0, dtls1;
++	unsigned int dtls;
+ 	int ret;
+ 
+-	ret = regmap_read(chg->regmap, MAX77865_CHG_REG_DETAILS_00, &dtls0);
++	ret = regmap_read(chg->regmap, MAX77865_CHG_REG_DETAILS_01, &dtls);
+ 	if (ret)
+ 		return ret;
+-	ret = regmap_read(chg->regmap, MAX77865_CHG_REG_DETAILS_01, &dtls1);
+-	if (ret)
+-		return ret;
+-
+-	*online = FIELD_GET(MAX77865_CHGIN_DTLS, dtls0) == MAX77865_CHGIN_VALID;
+ 
+-	switch (FIELD_GET(MAX77865_CHG_DTLS, dtls1)) {
++	switch (FIELD_GET(MAX77865_CHG_DTLS, dtls)) {
+ 	case 0x0:	/* precharge */
+ 	case 0x1:	/* fast charge, constant current */
+ 	case 0x2:	/* fast charge, constant voltage */
+-		*status = POWER_SUPPLY_STATUS_CHARGING;
+-		break;
++		return POWER_SUPPLY_STATUS_CHARGING;
+ 	case 0x3:	/* top-off */
+ 	case 0x4:	/* done */
+-		*status = POWER_SUPPLY_STATUS_FULL;
+-		break;
++		return POWER_SUPPLY_STATUS_FULL;
++	case 0x8:	/* off: no valid input or charging disabled */
++		return chg->online ? POWER_SUPPLY_STATUS_NOT_CHARGING :
++				     POWER_SUPPLY_STATUS_DISCHARGING;
+ 	case 0x5:	/* timer fault */
+ 	case 0x6:	/* thermal suspend */
+-	case 0x7:	/* charger off */
+-		*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
++	case 0x7:	/* battery thermistor suspend */
++	case 0xa:	/* junction temperature shutdown */
++	case 0xb:	/* watchdog expired */
++		return POWER_SUPPLY_STATUS_NOT_CHARGING;
++	default:
++		return POWER_SUPPLY_STATUS_UNKNOWN;
++	}
++}
++
++static int max77865_charger_charge_type(struct max77865_charger *chg,
++					int *type)
++{
++	unsigned int dtls;
++	int ret;
++
++	ret = regmap_read(chg->regmap, MAX77865_CHG_REG_DETAILS_01, &dtls);
++	if (ret)
++		return ret;
++
++	switch (FIELD_GET(MAX77865_CHG_DTLS, dtls)) {
++	case 0x0:
++		*type = POWER_SUPPLY_CHARGE_TYPE_TRICKLE;
+ 		break;
+-	case 0x8:	/* no valid input */
+-	case 0xa:
+-	case 0xb:
+-		*status = POWER_SUPPLY_STATUS_DISCHARGING;
++	case 0x1:
++	case 0x2:
++	case 0x3:
++		*type = POWER_SUPPLY_CHARGE_TYPE_FAST;
+ 		break;
+ 	default:
+-		*status = POWER_SUPPLY_STATUS_UNKNOWN;
++		*type = POWER_SUPPLY_CHARGE_TYPE_NONE;
+ 		break;
+ 	}
+ 
+ 	return 0;
+ }
+ 
++static enum power_supply_usb_type max77865_charger_detect(struct max77865_charger *chg,
++							  bool *online)
++{
++	unsigned int dtls, bc;
++
++	if (regmap_read(chg->regmap, MAX77865_CHG_REG_DETAILS_00, &dtls) ||
++	    regmap_read(chg->muic, MAX77865_MUIC_REG_STATUS1_BC, &bc)) {
++		*online = false;
++		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
++	}
++
++	*online = FIELD_GET(MAX77865_CHGIN_DTLS, dtls) == MAX77865_CHGIN_VALID;
++	if (!*online || !(bc & MAX77865_MUIC_VBVOLT) ||
++	    (bc & MAX77865_MUIC_CHGDETRUN))
++		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
++
++	switch (FIELD_GET(MAX77865_MUIC_CHGTYP, bc)) {
++	case MAX77865_MUIC_CHGTYP_SDP:
++		return POWER_SUPPLY_USB_TYPE_SDP;
++	case MAX77865_MUIC_CHGTYP_CDP:
++		return POWER_SUPPLY_USB_TYPE_CDP;
++	case MAX77865_MUIC_CHGTYP_DCP:
++		return POWER_SUPPLY_USB_TYPE_DCP;
++	default:
++		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
++	}
++}
++
++/* input current limit and charge current for a charger type, in uA */
++static void max77865_charger_type_limits(enum power_supply_usb_type type,
++					 int *input_limit, int *cc)
++{
++	switch (type) {
++	case POWER_SUPPLY_USB_TYPE_CDP:
++		*input_limit = 1500000;
++		*cc = 1500000;
++		break;
++	case POWER_SUPPLY_USB_TYPE_DCP:
++		*input_limit = 1800000;
++		*cc = 2100000;
++		break;
++	case POWER_SUPPLY_USB_TYPE_SDP:
++	default:
++		*input_limit = 500000;
++		*cc = 500000;
++		break;
++	}
++}
++
++static const char *max77865_charger_health_name(int health)
++{
++	switch (health) {
++	case POWER_SUPPLY_HEALTH_COLD:
++		return "cold, charging stopped";
++	case POWER_SUPPLY_HEALTH_COOL:
++		return "cool, charge current reduced";
++	case POWER_SUPPLY_HEALTH_WARM:
++		return "warm, charge current and voltage reduced";
++	case POWER_SUPPLY_HEALTH_HOT:
++		return "hot, charging stopped";
++	default:
++		return "normal";
++	}
++}
++
++/* update the battery health from its temperature, with hysteresis */
++static void max77865_charger_update_health(struct max77865_charger *chg)
++{
++	int temp, health = chg->health;
++
++	if (!chg->battery_tz) {
++		chg->battery_tz = thermal_zone_get_zone_by_name("battery-thermal");
++		if (IS_ERR(chg->battery_tz))
++			chg->battery_tz = NULL;
++	}
++
++	if (!chg->battery_tz || thermal_zone_get_temp(chg->battery_tz, &temp)) {
++		chg->health = POWER_SUPPLY_HEALTH_UNKNOWN;
++		return;
++	}
++
++	switch (health) {
++	case POWER_SUPPLY_HEALTH_COLD:
++		if (temp >= MAX77865_TEMP_COLD_RECOVER)
++			health = POWER_SUPPLY_HEALTH_COOL;
++		break;
++	case POWER_SUPPLY_HEALTH_COOL:
++		if (temp < MAX77865_TEMP_COLD)
++			health = POWER_SUPPLY_HEALTH_COLD;
++		else if (temp >= MAX77865_TEMP_COOL_RECOVER)
++			health = POWER_SUPPLY_HEALTH_GOOD;
++		break;
++	case POWER_SUPPLY_HEALTH_WARM:
++		if (temp >= MAX77865_TEMP_HOT)
++			health = POWER_SUPPLY_HEALTH_HOT;
++		else if (temp < MAX77865_TEMP_WARM_RECOVER)
++			health = POWER_SUPPLY_HEALTH_GOOD;
++		break;
++	case POWER_SUPPLY_HEALTH_HOT:
++		if (temp < MAX77865_TEMP_HOT_RECOVER)
++			health = POWER_SUPPLY_HEALTH_WARM;
++		break;
++	default:
++		health = POWER_SUPPLY_HEALTH_GOOD;
++		break;
++	}
++
++	/* a large jump moves past the hysteresis band */
++	if (temp < MAX77865_TEMP_COLD)
++		health = POWER_SUPPLY_HEALTH_COLD;
++	else if (temp >= MAX77865_TEMP_HOT)
++		health = POWER_SUPPLY_HEALTH_HOT;
++	else if (health == POWER_SUPPLY_HEALTH_GOOD && temp < MAX77865_TEMP_COOL)
++		health = POWER_SUPPLY_HEALTH_COOL;
++	else if (health == POWER_SUPPLY_HEALTH_GOOD && temp >= MAX77865_TEMP_WARM)
++		health = POWER_SUPPLY_HEALTH_WARM;
++
++	if (health != chg->health)
++		dev_info(chg->dev, "battery at %d.%d C: %s\n", temp / 1000,
++			 abs(temp % 1000) / 100,
++			 max77865_charger_health_name(health));
++	chg->health = health;
++}
++
++/* program the limits for the current charger type, health and user caps */
++static int max77865_charger_apply(struct max77865_charger *chg)
++{
++	int input_limit, cc, cv = chg->cv_max;
++	bool enable = !chg->inhibit;
++	unsigned int val;
++	int ret;
++
++	max77865_charger_type_limits(chg->usb_type, &input_limit, &cc);
++	input_limit = min(input_limit, chg->user_input_limit);
++	cc = min3(cc, chg->cc_max, chg->user_cc);
++
++	switch (chg->health) {
++	case POWER_SUPPLY_HEALTH_COLD:
++	case POWER_SUPPLY_HEALTH_HOT:
++		enable = false;
++		break;
++	case POWER_SUPPLY_HEALTH_COOL:
++		cc = min(cc, MAX77865_COOL_CC_UA);
++		break;
++	case POWER_SUPPLY_HEALTH_WARM:
++		cc = min(cc, MAX77865_WARM_CC_UA);
++		cv = min(cv, MAX77865_WARM_CV_UV);
++		break;
++	case POWER_SUPPLY_HEALTH_GOOD:
++		break;
++	default:
++		cc = min(cc, MAX77865_NO_TEMP_CC_UA);
++		break;
++	}
++
++	/* registers are only written when they differ */
++	val = clamp(input_limit, MAX77865_CHG_CHGIN_ILIM_MIN_UA,
++		    MAX77865_CHG_CHGIN_ILIM_MAX_UA) /
++	      MAX77865_CHG_CHGIN_ILIM_STEP_UA;
++	ret = regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_09,
++				 MAX77865_CHG_CHGIN_ILIM, val);
++	if (ret)
++		return ret;
++	chg->input_limit = input_limit;
++
++	val = min(cc, MAX77865_CHG_CC_MAX_UA) / MAX77865_CHG_CC_STEP_UA;
++	ret = regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_02,
++				 MAX77865_CHG_CC, val);
++	if (ret)
++		return ret;
++	chg->cc = cc;
++
++	val = (clamp(cv, MAX77865_CHG_CV_MIN_UV, MAX77865_CHG_CV_MAX_UV) -
++	       MAX77865_CHG_CV_MIN_UV) / MAX77865_CHG_CV_STEP_UV;
++	ret = regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_04,
++				 MAX77865_CHG_CV_PRM, val);
++	if (ret)
++		return ret;
++	chg->cv = cv;
++
++	return regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_00,
++				  MAX77865_CHG_CNFG_00_CHG,
++				  enable ? MAX77865_CHG_CNFG_00_CHG : 0);
++}
++
++static void max77865_charger_poll(struct work_struct *work)
++{
++	struct max77865_charger *chg = container_of(work, struct max77865_charger,
++						    poll.work);
++	enum power_supply_usb_type usb_type;
++	bool online, changed;
++	int health, status;
++
++	/* clear the charger watchdog */
++	regmap_write_bits(chg->regmap, MAX77865_CHG_REG_CNFG_06,
++			  MAX77865_CHG_WDTCLR, MAX77865_CHG_WDTCLR_CLEAR);
++
++	mutex_lock(&chg->lock);
++	usb_type = max77865_charger_detect(chg, &online);
++	health = chg->health;
++	max77865_charger_update_health(chg);
++
++	changed = usb_type != chg->usb_type || online != chg->online ||
++		  health != chg->health;
++	chg->usb_type = usb_type;
++	chg->online = online;
++	/* also restores the settings should the charger have reset them */
++	if (max77865_charger_apply(chg))
++		dev_err_ratelimited(chg->dev, "failed to set the charging limits\n");
++
++	status = max77865_charger_status(chg);
++	if (status != chg->status)
++		changed = true;
++	chg->status = status;
++	mutex_unlock(&chg->lock);
++
++	if (changed)
++		power_supply_changed(chg->psy);
++
++	schedule_delayed_work(&chg->poll, MAX77865_POLL_INTERVAL);
++}
++
+ static int max77865_charger_get_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 union power_supply_propval *val)
+ {
+ 	struct max77865_charger *chg = power_supply_get_drvdata(psy);
+-	int online, status, ret;
+-
+-	ret = max77865_charger_read(chg, &online, &status);
+-	if (ret)
+-		return ret;
++	int ret = 0;
+ 
++	mutex_lock(&chg->lock);
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_ONLINE:
+-		val->intval = online;
++		val->intval = chg->online;
+ 		break;
+ 	case POWER_SUPPLY_PROP_STATUS:
+-		val->intval = status;
++		ret = max77865_charger_status(chg);
++		if (ret >= 0) {
++			val->intval = ret;
++			ret = 0;
++		}
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_TYPE:
++		ret = max77865_charger_charge_type(chg, &val->intval);
++		break;
++	case POWER_SUPPLY_PROP_HEALTH:
++		val->intval = chg->health;
++		break;
++	case POWER_SUPPLY_PROP_USB_TYPE:
++		val->intval = chg->usb_type;
++		break;
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		val->intval = chg->input_limit;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		val->intval = chg->cc;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
++		val->intval = chg->cc_max;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++		val->intval = chg->cv;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
++		val->intval = chg->cv_max;
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		val->intval = chg->inhibit ?
++			POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
++			POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
+ 		break;
+ 	default:
+-		return -EINVAL;
++		ret = -EINVAL;
++		break;
+ 	}
++	mutex_unlock(&chg->lock);
+ 
+-	return 0;
++	return ret;
++}
++
++static int max77865_charger_set_property(struct power_supply *psy,
++					 enum power_supply_property psp,
++					 const union power_supply_propval *val)
++{
++	struct max77865_charger *chg = power_supply_get_drvdata(psy);
++	int ret;
++
++	mutex_lock(&chg->lock);
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		if (val->intval < MAX77865_CHG_CHGIN_ILIM_MIN_UA) {
++			ret = -EINVAL;
++			goto out;
++		}
++		chg->user_input_limit = val->intval;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		if (val->intval < MAX77865_CHG_CC_MIN_UA) {
++			ret = -EINVAL;
++			goto out;
++		}
++		chg->user_cc = val->intval;
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		if (val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO &&
++		    val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE) {
++			ret = -EINVAL;
++			goto out;
++		}
++		chg->inhibit = val->intval ==
++			       POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE;
++		break;
++	default:
++		ret = -EINVAL;
++		goto out;
++	}
++
++	ret = max77865_charger_apply(chg);
++out:
++	mutex_unlock(&chg->lock);
++
++	if (!ret)
++		power_supply_changed(psy);
++
++	return ret;
++}
++
++static int max77865_charger_property_is_writeable(struct power_supply *psy,
++						  enum power_supply_property psp)
++{
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		return 1;
++	default:
++		return 0;
++	}
+ }
+ 
+-static enum power_supply_property max77865_charger_props[] = {
++static const enum power_supply_property max77865_charger_props[] = {
+ 	POWER_SUPPLY_PROP_ONLINE,
+ 	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_CHARGE_TYPE,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_USB_TYPE,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
+ };
+ 
+ static const struct power_supply_desc max77865_charger_desc = {
+ 	.name		= "max77865-charger",
+ 	.type		= POWER_SUPPLY_TYPE_USB,
++	.usb_types	= BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
++			  BIT(POWER_SUPPLY_USB_TYPE_SDP) |
++			  BIT(POWER_SUPPLY_USB_TYPE_CDP) |
++			  BIT(POWER_SUPPLY_USB_TYPE_DCP),
++	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
++			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
+ 	.properties	= max77865_charger_props,
+ 	.num_properties	= ARRAY_SIZE(max77865_charger_props),
+ 	.get_property	= max77865_charger_get_property,
++	.set_property	= max77865_charger_set_property,
++	.property_is_writeable = max77865_charger_property_is_writeable,
+ };
+ 
+-/* There is no interrupt support yet, poll for cable and charging changes */
+-static void max77865_charger_poll(struct work_struct *work)
+-{
+-	struct max77865_charger *chg = container_of(work, struct max77865_charger,
+-						    poll.work);
+-	int online, status;
+-
+-	if (!max77865_charger_read(chg, &online, &status) &&
+-	    (online != chg->online || status != chg->status)) {
+-		chg->online = online;
+-		chg->status = status;
+-		power_supply_changed(chg->psy);
+-	}
+-
+-	schedule_delayed_work(&chg->poll, MAX77865_POLL_INTERVAL);
+-}
+-
+ static void max77865_charger_stop_poll(void *data)
+ {
+ 	struct max77865_charger *chg = data;
+@@ -148,21 +549,60 @@ static void max77865_charger_stop_poll(void *data)
+ 	cancel_delayed_work_sync(&chg->poll);
+ }
+ 
+-static int max77865_muic_route_usb(struct device *dev,
+-				   struct i2c_client *client)
++static int max77865_muic_init(struct max77865_charger *chg,
++			      struct i2c_client *client)
+ {
+ 	struct i2c_client *muic;
+ 	int ret;
+ 
+-	muic = devm_i2c_new_dummy_device(dev, client->adapter,
++	muic = devm_i2c_new_dummy_device(chg->dev, client->adapter,
+ 					 MAX77865_MUIC_ADDR);
+ 	if (IS_ERR(muic))
+ 		return PTR_ERR(muic);
+ 
+-	ret = i2c_smbus_write_byte_data(muic, MAX77865_MUIC_REG_CONTROL1,
+-					MAX77865_MUIC_COM_USB_AP);
++	chg->muic = devm_regmap_init_i2c(muic, &max77865_regmap_config);
++	if (IS_ERR(chg->muic))
++		return PTR_ERR(chg->muic);
+ 
+-	return ret < 0 ? ret : 0;
++	ret = regmap_write(chg->muic, MAX77865_MUIC_REG_CONTROL1,
++			   MAX77865_MUIC_COM_USB_AP);
++	if (ret)
++		dev_warn(chg->dev, "failed to route USB to the AP: %d\n", ret);
++
++	return 0;
++}
++
++static int max77865_charger_init_battery(struct max77865_charger *chg)
++{
++	struct power_supply_battery_info *info;
++	unsigned int val;
++	int ret;
++
++	ret = power_supply_get_battery_info(chg->psy, &info);
++	if (ret)
++		return dev_err_probe(chg->dev, ret,
++				     "no monitored battery information\n");
++
++	if (info->constant_charge_current_max_ua <= 0 ||
++	    info->constant_charge_voltage_max_uv <= 0)
++		return dev_err_probe(chg->dev, -EINVAL,
++				     "battery charge current or voltage missing\n");
++
++	chg->cc_max = info->constant_charge_current_max_ua;
++	chg->cv_max = info->constant_charge_voltage_max_uv;
++
++	if (info->charge_term_current_ua > 0) {
++		val = (clamp(info->charge_term_current_ua,
++			     MAX77865_CHG_TO_ITH_MIN_UA,
++			     MAX77865_CHG_TO_ITH_MAX_UA) -
++		       MAX77865_CHG_TO_ITH_MIN_UA) / MAX77865_CHG_TO_ITH_STEP_UA;
++		ret = regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_03,
++					 MAX77865_CHG_TO_ITH, val);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
+ }
+ 
+ static int max77865_charger_probe(struct i2c_client *client)
+@@ -182,9 +622,21 @@ static int max77865_charger_probe(struct i2c_client *client)
+ 		return dev_err_probe(dev, PTR_ERR(chg->regmap),
+ 				     "failed to init regmap\n");
+ 
+-	ret = max77865_muic_route_usb(dev, client);
++	ret = max77865_muic_init(chg, client);
+ 	if (ret)
+-		dev_warn(dev, "failed to route USB to the AP: %d\n", ret);
++		return dev_err_probe(dev, ret, "failed to init the MUIC\n");
++
++	ret = devm_mutex_init(dev, &chg->lock);
++	if (ret)
++		return ret;
++
++	/* nothing programmed yet, the first poll sets everything */
++	chg->usb_type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
++	chg->health = POWER_SUPPLY_HEALTH_UNKNOWN;
++	chg->status = POWER_SUPPLY_STATUS_UNKNOWN;
++	chg->online = true;
++	chg->user_input_limit = INT_MAX;
++	chg->user_cc = INT_MAX;
+ 
+ 	psy_cfg.drv_data = chg;
+ 	psy_cfg.fwnode = dev_fwnode(dev);
+@@ -194,7 +646,10 @@ static int max77865_charger_probe(struct i2c_client *client)
+ 		return dev_err_probe(dev, PTR_ERR(chg->psy),
+ 				     "failed to register power supply\n");
+ 
+-	chg->online = -1;
++	ret = max77865_charger_init_battery(chg);
++	if (ret)
++		return ret;
++
+ 	INIT_DELAYED_WORK(&chg->poll, max77865_charger_poll);
+ 	ret = devm_add_action_or_reset(dev, max77865_charger_stop_poll, chg);
+ 	if (ret)

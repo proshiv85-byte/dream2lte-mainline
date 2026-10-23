@@ -1,0 +1,412 @@
+From bf41e592d4e749a3d30cba8d37357941c34ce60c Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Fri, 23 Oct 2026 16:09:19 +0300
+Subject: [PATCH 13/16] WIP: Exynos8895 panel brightness and screen off
+
+DECON driver: send DCS commands to the S6E3HA6 panel through the DSIM
+command FIFO (one packet at a time, like the vendor driver). The panel
+sleeps (display off + sleep in) while the CRTC is off and wakes up when
+it is enabled again. Brightness is a backlight device ("panel") that
+sets the panel's AOR, the share of each frame the pixels stay dark, on
+top of the gamma curve the bootloader programmed; the vendor driver
+dims the same way at its lower levels but also switches calibrated
+gamma curves above them, which is not done here.
+
+The CRTC gets a GAMMA_LUT property that only accepts no table:
+wlroots resets the gamma when an output is enabled again and fails
+silently (legacy gamma path) on a CRTC without gamma, so the screen
+could not be turned back on.
+
+exynosdrm: no render node on Exynos8895. With one, wlroots/Mesa
+(kmsro) render on it and free imported scanout buffers with
+DESTROY_DUMB, which render nodes refuse: every buffer reallocated on a
+screen off/on cycle leaked 16 MB of CMA. Without it they use the
+primary node like on other display controllers paired with panfrost.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    |   5 +-
+ drivers/gpu/drm/exynos/Kconfig                |   1 +
+ drivers/gpu/drm/exynos/exynos8895_drm_decon.c | 208 +++++++++++++++++-
+ drivers/gpu/drm/exynos/exynos_drm_drv.c       |  23 +-
+ 4 files changed, 232 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index 4fb3d23c3..5ed279eb4 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -1862,8 +1862,9 @@ pcie_wifi0: pcie@116a0000 {
+ 		decon: display-controller@12860000 {
+ 			compatible = "samsung,exynos8895-decon";
+ 			reg = <0x12860000 0x10000>,
+-			      <0x128b1000 0x1000>;
+-			reg-names = "decon", "idma";
++			      <0x128b1000 0x1000>,
++			      <0x12870000 0x100>;
++			reg-names = "decon", "idma", "dsim";
+ 			interrupts = <GIC_SPI 142 IRQ_TYPE_LEVEL_HIGH>,
+ 				     <GIC_SPI 143 IRQ_TYPE_LEVEL_HIGH>,
+ 				     <GIC_SPI 144 IRQ_TYPE_LEVEL_HIGH>;
+diff --git a/drivers/gpu/drm/exynos/Kconfig b/drivers/gpu/drm/exynos/Kconfig
+index 7ea3a387c..add0e09e8 100644
+--- a/drivers/gpu/drm/exynos/Kconfig
++++ b/drivers/gpu/drm/exynos/Kconfig
+@@ -32,6 +32,7 @@ config DRM_EXYNOS5433_DECON
+ 
+ config DRM_EXYNOS8895_DECON
+ 	bool "DECON-F on Exynos8895"
++	depends on BACKLIGHT_CLASS_DEVICE=y || BACKLIGHT_CLASS_DEVICE=DRM_EXYNOS
+ 	select DRM_KMS_HELPER
+ 	help
+ 	  Choose this option if you want to use the Exynos8895 DECON-F for DRM.
+diff --git a/drivers/gpu/drm/exynos/exynos8895_drm_decon.c b/drivers/gpu/drm/exynos/exynos8895_drm_decon.c
+index b986d4ff0..cc4240f89 100644
+--- a/drivers/gpu/drm/exynos/exynos8895_drm_decon.c
++++ b/drivers/gpu/drm/exynos/exynos8895_drm_decon.c
+@@ -6,20 +6,32 @@
+  * mode with hardware trigger from the panel's TE line, DSC, the DSI host and
+  * the panel. This driver keeps that configuration and only feeds the IDMA
+  * channel behind the default window with new buffers, latched through the
+- * DECON shadow registers at the next frame start. Panel control and a full
+- * power-up sequence are left for later.
++ * DECON shadow registers at the next frame start. A full power-up sequence
++ * is left for later.
++ *
++ * The S6E3HA6 panel is driven through DCS commands sent by the DSI host: it
++ * sleeps while the CRTC is off, and its brightness is set through the AOR
++ * (the share of each frame the pixels are dark), keeping the gamma curve the
++ * bootloader programmed. This is how the vendor driver dims at the lower
++ * brightness levels; above them it also switches gamma curves computed from
++ * the panel's calibration, which is not done here.
+  */
+ 
+ #include <linux/aperture.h>
++#include <linux/backlight.h>
+ #include <linux/component.h>
++#include <linux/delay.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
++#include <linux/iopoll.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ 
+ #include <drm/drm_atomic_helper.h>
++#include <drm/drm_color_mgmt.h>
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_framebuffer.h>
+ #include <drm/drm_modes.h>
+@@ -27,6 +39,8 @@
+ #include <drm/drm_simple_kms_helper.h>
+ #include <drm/drm_vblank.h>
+ 
++#include <video/mipi_display.h>
++
+ #include "exynos_drm_crtc.h"
+ #include "exynos_drm_drv.h"
+ #include "exynos_drm_fb.h"
+@@ -59,9 +73,27 @@
+ #define IDMA_IN_BASE_ADDR_Y		0x0040
+ #define IDMA_SIZE(w, h)			(((h) << 16) | (w))
+ 
++/* DSIM registers */
++#define DSIM_PKTHDR			0x0058
++#define DSIM_PKTHDR_HDR(id, d0, d1)	(((d1) << 16) | ((d0) << 8) | (id))
++#define DSIM_PAYLOAD			0x005c
++#define DSIM_FIFOCTRL			0x0068
++#define DSIM_FIFOCTRL_EMPTY_PH_SFR	BIT(10)
++
++/* S6E3HA6 commands */
++#define S6E3HA6_KEY1			0x9f	/* access to DCS display on/off */
++#define S6E3HA6_KEY2			0xf0	/* access to the brightness registers */
++#define S6E3HA6_AOR			0xb1
++#define S6E3HA6_GAMMA_UPDATE		0xf7
++/* AOR in lines kept dark per frame: fully lit and dimmest */
++#define S6E3HA6_AOR_BRIGHTEST		0x000c
++#define S6E3HA6_AOR_DIMMEST		0x0b70
++#define S6E3HA6_MAX_BRIGHTNESS		(S6E3HA6_AOR_DIMMEST - S6E3HA6_AOR_BRIGHTEST)
++
+ /* the bootloader puts its framebuffer on window 5, fed by IDMA G0 */
+ #define DECON_WIN			5
+ #define DECON_IRQS			3
++#define DECON_GAMMA_SIZE		256
+ 
+ struct decon8895_context {
+ 	struct device *dev;
+@@ -69,12 +101,17 @@ struct decon8895_context {
+ 	void *dma_priv;
+ 	void __iomem *regs;
+ 	void __iomem *idma;
++	void __iomem *dsim;
+ 	struct exynos_drm_crtc *crtc;
+ 	struct exynos_drm_plane plane;
+ 	struct exynos_drm_plane_config plane_config;
+ 	struct drm_encoder encoder;
+ 	struct drm_connector connector;
+ 	int irqs[DECON_IRQS];
++	struct backlight_device *bl;
++	/* serialises panel commands and panel_on */
++	struct mutex panel_lock;
++	bool panel_on;
+ 	/* bootloader framebuffer, scanned out while the CRTC is off */
+ 	u32 boot_fb;
+ 	u32 boot_src_size;
+@@ -125,6 +162,147 @@ static void decon8895_scanout(struct decon8895_context *ctx, u32 addr,
+ 	writel(addr, ctx->idma + IDMA_IN_BASE_ADDR_Y);
+ }
+ 
++static int decon8895_dsi_write(struct decon8895_context *ctx, const u8 *buf,
++			       size_t len)
++{
++	u32 val, payload;
++	size_t i;
++	int ret;
++
++	if (len == 1) {
++		writel(DSIM_PKTHDR_HDR(MIPI_DSI_DCS_SHORT_WRITE, buf[0], 0),
++		       ctx->dsim + DSIM_PKTHDR);
++	} else if (len == 2) {
++		writel(DSIM_PKTHDR_HDR(MIPI_DSI_DCS_SHORT_WRITE_PARAM, buf[0],
++				       buf[1]), ctx->dsim + DSIM_PKTHDR);
++	} else {
++		for (i = 0; i < len; i += 4) {
++			payload = 0;
++			memcpy(&payload, buf + i, min(len - i, 4));
++			writel(payload, ctx->dsim + DSIM_PAYLOAD);
++		}
++		writel(DSIM_PKTHDR_HDR(MIPI_DSI_DCS_LONG_WRITE, len & 0xff,
++				       len >> 8), ctx->dsim + DSIM_PKTHDR);
++	}
++
++	/* one packet at a time, as on the vendor driver */
++	ret = readl_poll_timeout(ctx->dsim + DSIM_FIFOCTRL, val,
++				 val & DSIM_FIFOCTRL_EMPTY_PH_SFR, 10, 50000);
++	if (ret)
++		dev_err(ctx->dev, "DSI command %#x timed out\n", buf[0]);
++
++	return ret;
++}
++
++#define decon8895_dcs(ctx, ret, ...) do {				\
++		static const u8 d[] = { __VA_ARGS__ };			\
++		if (!(ret))						\
++			(ret) = decon8895_dsi_write(ctx, d, sizeof(d));	\
++	} while (0)
++
++static int decon8895_panel_set_brightness(struct decon8895_context *ctx,
++					  int brightness)
++{
++	u16 aor = S6E3HA6_AOR_DIMMEST - brightness;
++	u8 aor_cmd[] = { S6E3HA6_AOR, aor >> 8, aor & 0xff };
++	int ret = 0;
++
++	decon8895_dcs(ctx, ret, S6E3HA6_KEY2, 0x5a, 0x5a);
++	if (!ret)
++		ret = decon8895_dsi_write(ctx, aor_cmd, sizeof(aor_cmd));
++	decon8895_dcs(ctx, ret, S6E3HA6_GAMMA_UPDATE, 0x03);
++	decon8895_dcs(ctx, ret, S6E3HA6_KEY2, 0xa5, 0xa5);
++
++	return ret;
++}
++
++static void decon8895_panel_on(struct decon8895_context *ctx)
++{
++	int ret = 0;
++
++	mutex_lock(&ctx->panel_lock);
++	if (ctx->panel_on)
++		goto out;
++
++	decon8895_dcs(ctx, ret, MIPI_DCS_EXIT_SLEEP_MODE);
++	/* let the panel take at least one frame before showing it */
++	msleep(20);
++	ret = decon8895_panel_set_brightness(ctx,
++					     backlight_get_brightness(ctx->bl));
++	decon8895_dcs(ctx, ret, S6E3HA6_KEY1, 0xa5, 0xa5);
++	decon8895_dcs(ctx, ret, MIPI_DCS_SET_DISPLAY_ON);
++	decon8895_dcs(ctx, ret, S6E3HA6_KEY1, 0x5a, 0x5a);
++	if (ret)
++		dev_err(ctx->dev, "failed to turn the panel on: %d\n", ret);
++	ctx->panel_on = true;
++out:
++	mutex_unlock(&ctx->panel_lock);
++}
++
++static void decon8895_panel_off(struct decon8895_context *ctx)
++{
++	int ret = 0;
++
++	mutex_lock(&ctx->panel_lock);
++	if (!ctx->panel_on)
++		goto out;
++
++	decon8895_dcs(ctx, ret, S6E3HA6_KEY1, 0xa5, 0xa5);
++	decon8895_dcs(ctx, ret, MIPI_DCS_SET_DISPLAY_OFF);
++	decon8895_dcs(ctx, ret, MIPI_DCS_ENTER_SLEEP_MODE);
++	decon8895_dcs(ctx, ret, S6E3HA6_KEY1, 0x5a, 0x5a);
++	if (ret)
++		dev_err(ctx->dev, "failed to turn the panel off: %d\n", ret);
++	/* the panel needs this long before it may be woken up again */
++	msleep(120);
++	ctx->panel_on = false;
++out:
++	mutex_unlock(&ctx->panel_lock);
++}
++
++static int decon8895_bl_update_status(struct backlight_device *bl)
++{
++	struct decon8895_context *ctx = bl_get_data(bl);
++	int ret = 0;
++
++	mutex_lock(&ctx->panel_lock);
++	/* applied when the panel is turned on */
++	if (ctx->panel_on)
++		ret = decon8895_panel_set_brightness(ctx,
++						     backlight_get_brightness(bl));
++	mutex_unlock(&ctx->panel_lock);
++
++	return ret;
++}
++
++static const struct backlight_ops decon8895_bl_ops = {
++	.update_status = decon8895_bl_update_status,
++};
++
++static void decon8895_atomic_enable(struct exynos_drm_crtc *crtc)
++{
++	decon8895_panel_on(crtc->ctx);
++}
++
++static void decon8895_atomic_disable(struct exynos_drm_crtc *crtc)
++{
++	decon8895_panel_off(crtc->ctx);
++}
++
++static int decon8895_atomic_check(struct exynos_drm_crtc *crtc,
++				  struct drm_crtc_state *state)
++{
++	/*
++	 * No gamma table is programmed. The property exists because
++	 * compositors expect to be able to reset the gamma, so accept only
++	 * the reset (no table).
++	 */
++	if (state->gamma_lut)
++		return -EINVAL;
++
++	return 0;
++}
++
+ static int decon8895_enable_vblank(struct exynos_drm_crtc *crtc)
+ {
+ 	struct decon8895_context *ctx = crtc->ctx;
+@@ -181,6 +359,9 @@ static void decon8895_atomic_flush(struct exynos_drm_crtc *crtc)
+ }
+ 
+ static const struct exynos_drm_crtc_ops decon8895_crtc_ops = {
++	.atomic_check = decon8895_atomic_check,
++	.atomic_enable = decon8895_atomic_enable,
++	.atomic_disable = decon8895_atomic_disable,
+ 	.enable_vblank = decon8895_enable_vblank,
+ 	.disable_vblank = decon8895_disable_vblank,
+ 	.update_plane = decon8895_update_plane,
+@@ -265,6 +446,8 @@ static int decon8895_bind(struct device *dev, struct device *master, void *data)
+ 	if (IS_ERR(ctx->crtc))
+ 		return PTR_ERR(ctx->crtc);
+ 
++	drm_crtc_enable_color_mgmt(&ctx->crtc->base, 0, false, DECON_GAMMA_SIZE);
++
+ 	ret = drm_simple_encoder_init(drm, &ctx->encoder, DRM_MODE_ENCODER_DSI);
+ 	if (ret)
+ 		return ret;
+@@ -310,6 +493,12 @@ static const struct component_ops decon8895_component_ops = {
+ static int decon8895_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
++	struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.max_brightness = S6E3HA6_MAX_BRIGHTNESS,
++		.brightness = S6E3HA6_MAX_BRIGHTNESS,
++		.scale = BACKLIGHT_SCALE_LINEAR,
++	};
+ 	struct decon8895_context *ctx;
+ 	u32 bg, src;
+ 	int i, ret;
+@@ -339,6 +528,10 @@ static int decon8895_probe(struct platform_device *pdev)
+ 	if (IS_ERR(ctx->idma))
+ 		return PTR_ERR(ctx->idma);
+ 
++	ctx->dsim = devm_platform_ioremap_resource_byname(pdev, "dsim");
++	if (IS_ERR(ctx->dsim))
++		return PTR_ERR(ctx->dsim);
++
+ 	if (!(readl(ctx->regs + DECON_DATA_PATH_CONTROL_0) & WIN_EN_F(DECON_WIN)))
+ 		return dev_err_probe(dev, -ENODEV,
+ 				     "display not set up by the bootloader\n");
+@@ -370,6 +563,17 @@ static int decon8895_probe(struct platform_device *pdev)
+ 			return ret;
+ 	}
+ 
++	/* the bootloader leaves the panel on */
++	ret = devm_mutex_init(dev, &ctx->panel_lock);
++	if (ret)
++		return ret;
++	ctx->panel_on = true;
++
++	ctx->bl = devm_backlight_device_register(dev, "panel", dev, ctx,
++						 &decon8895_bl_ops, &props);
++	if (IS_ERR(ctx->bl))
++		return PTR_ERR(ctx->bl);
++
+ 	platform_set_drvdata(pdev, ctx);
+ 
+ 	return component_add(dev, &decon8895_component_ops);
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_drv.c b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+index 5522ffa1d..3244ca005 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_drv.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/component.h>
+ #include <linux/dma-mapping.h>
++#include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/uaccess.h>
+@@ -120,6 +121,26 @@ static const struct drm_driver exynos_drm_driver = {
+ 	.minor	= DRIVER_MINOR,
+ };
+ 
++/*
++ * Exynos8895 has no G2D or IPP here, rendering is done by the Mali GPU with
++ * panfrost. Without a render node of its own, Mesa (kmsro) and compositors
++ * treat the display controller as a plain KMS device: Mesa allocates and
++ * frees scanout buffers as dumb buffers through the primary node, which it
++ * cannot do through a render node (the buffers would leak).
++ */
++static struct drm_driver exynos_drm_driver_norender;
++
++static const struct drm_driver *exynos_drm_get_driver(void)
++{
++	if (!of_machine_is_compatible("samsung,exynos8895"))
++		return &exynos_drm_driver;
++
++	exynos_drm_driver_norender = exynos_drm_driver;
++	exynos_drm_driver_norender.driver_features &= ~DRIVER_RENDER;
++
++	return &exynos_drm_driver_norender;
++}
++
+ static int exynos_drm_suspend(struct device *dev)
+ {
+ 	struct drm_device *drm_dev = dev_get_drvdata(dev);
+@@ -243,7 +264,7 @@ static int exynos_drm_bind(struct device *dev)
+ 	unsigned int clone_mask;
+ 	int ret;
+ 
+-	drm = drm_dev_alloc(&exynos_drm_driver, dev);
++	drm = drm_dev_alloc(exynos_drm_get_driver(), dev);
+ 	if (IS_ERR(drm))
+ 		return PTR_ERR(drm);
+ 

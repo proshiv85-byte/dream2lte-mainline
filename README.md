@@ -19,15 +19,15 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | CPU frequency scaling | works: A53 455–1690 MHz, Mongoose 741–2314 MHz, via the APM firmware (needs the DVFS plugin, see below) |
 | GPU (Mali-G71 MP20) | works: `panfrost` + Mesa (OpenGL ES / OpenGL), DVFS 260–546 MHz, sway renders on it |
 | WiFi (BCM4361) | works: scan and connect, 2.4 + 5 GHz, via `brcmfmac` (needs the Samsung firmware, see below) |
-| Thermal | works: CPU, GPU and ISP sensors, CPUs throttle at 80 °C (big) / 90 °C (little), shutdown at 115 °C |
+| Thermal | works: CPU, GPU and ISP sensors, CPUs throttle at 80 °C (big) / 90 °C (little), shutdown at 115 °C; battery, charger and USB connector thermistors |
 | microSD | reads work at reduced speed (~3.3 MB/s, card clock capped at 7 MHz for now) |
-| Display | works: DRM driver (`exynosdrm`), GPU buffers flipped straight to the panel at 60 Hz; no brightness or screen off yet |
+| Display | works: DRM driver (`exynosdrm`), GPU buffers flipped straight to the panel at 60 Hz; brightness (`/sys/class/backlight/panel`), screen off (`swaymsg "output * power off"`) |
 | Touchscreen (STM FTS8) | works |
 | Buttons | works |
 | UFS storage | works (HS-G3, 2 lanes), verified reads/writes |
 | USB device mode | works, high-speed (RNDIS/NCM/... via configfs) |
 | Battery fuel gauge | works (MAX77865 FG, `max17042` driver) |
-| Charging | charger state reported; charges at the bootloader's settings |
+| Charging | works: computer port 500 mA, charging port (CDP) 1.5 A, wall charger 2.1 A, slower or stopped when the battery is too cold or too hot; no 9 V fast charging yet |
 | RTC | works (S2MPS17, through the APM firmware) |
 | Reboot, reboot to recovery | works; hardware watchdog available |
 | Power off | wired up, not tested yet |
@@ -51,7 +51,10 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 - display: Exynos8895 DECON-F driver for `exynosdrm`. It keeps the display
   path set up by the bootloader (command mode panel, DSC, DSI) and only
   flips buffers; with the name `exynos`, Mesa scans out panfrost-rendered
-  buffers directly
+  buffers directly. Panel commands go through the DSI host: the panel
+  sleeps while the screen is off, and brightness sets how long each frame
+  is lit (AOR), on the bootloader's gamma curve. No render node on this SoC
+  (Mesa would leak scanout buffers through it)
 - CPU idle: PSCI core power-down; `exynos8895-cpupm` sets the core's PMU
   power configuration around it (and disarms the cluster power-down the
   bootloader leaves enabled, which loses the L2 contents)
@@ -59,7 +62,12 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
   block fix for requests stuck in single-block mode after a retry
 - watchdog: Exynos8895 variant of `s3c2410_wdt`; the APM firmware is
   stopped before a reset like on the vendor kernel
-- MAX77865: charger state and USB routing of the MUIC
+- MAX77865 charger: charge current by charger type (BC1.2 detection of the
+  MUIC), battery temperature limits like the vendor kernel, and the
+  charger's watchdog cleared regularly (without it, charging stopped about
+  a minute and a half after boot); USB routing of the MUIC
+- ADC: Exynos8895 variant of `exynos_adc`; the battery, charger and USB
+  connector thermistors are read through it with `generic-adc-thermal`
 - `stmfts`: FTS8 variant (`st,stmfts8`)
 - ACPM (the APM power-management firmware): loading of the firmware plugins
   the 8895 expects from the kernel, DVFS clocks for `clk-acpm`, mailbox and
@@ -76,6 +84,18 @@ The vendor kernel (Samsung 4.4) was used as the reference for the hardware
 sequences; the code was written for mainline with an AI assistant (Claude),
 see the `Assisted-by` tags. No `Signed-off-by` is added: these are not
 submissions.
+
+## Using it
+
+- brightness: `echo 1500 > /sys/class/backlight/panel/brightness` (0–2916;
+  `brightnessctl` works too). It is not saved across reboots.
+- screen off and on: `swaymsg "output * power off"` / `power on`, or
+  swayidle
+- charger: `/sys/class/power_supply/max77865-charger/` shows the charger
+  type (`usb_type`), the current limits and the battery temperature state
+  (`health`). `echo inhibit-charge > charge_behaviour` stops charging while
+  the phone keeps running from USB; writing `constant_charge_current` (µA)
+  lowers the charge current.
 
 ## Booting
 

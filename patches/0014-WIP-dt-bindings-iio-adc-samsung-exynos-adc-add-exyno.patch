@@ -1,0 +1,23 @@
+From 21fbc8ad89d7f67cd3307741d70ae9999ee5f881 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Fri, 23 Oct 2026 16:32:17 +0300
+Subject: [PATCH 14/16] WIP: dt-bindings: iio: adc: samsung,exynos-adc: add
+ exynos8895-adc
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../devicetree/bindings/iio/adc/samsung,exynos-adc.yaml          | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/iio/adc/samsung,exynos-adc.yaml b/Documentation/devicetree/bindings/iio/adc/samsung,exynos-adc.yaml
+index def879f6e..ad857334b 100644
+--- a/Documentation/devicetree/bindings/iio/adc/samsung,exynos-adc.yaml
++++ b/Documentation/devicetree/bindings/iio/adc/samsung,exynos-adc.yaml
+@@ -18,6 +18,7 @@ properties:
+           - samsung,exynos3250-adc
+           - samsung,exynos4212-adc                # Exynos4212 and Exynos4412
+           - samsung,exynos7-adc
++          - samsung,exynos8895-adc
+           - samsung,s3c6410-adc
+           - samsung,s5pv210-adc
+       - items:
