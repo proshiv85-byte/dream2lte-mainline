@@ -174,6 +174,22 @@ PH="ssh root@172.16.42.1" tools/ffmpeg-v4l2/build.sh install
 An FFmpeg update from pacman overwrites it; run the script again after one.
 VP9 is decoded by Firefox's own bundled decoders, so it stays in software.
 
+### Mesa fix for the Mali-G71 (rounded corners)
+
+On the G71, panfrost's shader derivatives (`dFdx`/`dFdy`/`fwidth`) are
+wrong: the cross-lane read they rely on returns zero there. Anything that
+antialiases with `fwidth()` breaks, e.g. Firefox draws its rounded tabs and
+address bar as half transparent blocks (GTK4 likely too).
+[`tools/mesa-g71`](tools/mesa-g71) patches Mesa to return zero derivatives on
+the G71 (correct shapes, hard edges; plus a fix for the lane constant of the
+G72/G31 path), cross-builds a panfrost-only Mesa and installs it to
+`/opt/mesa-g71`, which `armtix-sway` uses when present. Nothing in `/usr` is
+replaced, so pacman updates don't break it; rebuild after a Mesa update:
+
+```sh
+PH="ssh root@172.16.42.1" tools/mesa-g71/build.sh install
+```
+
 ### WiFi firmware
 
 The WiFi firmware is Samsung's and comes from the phone's vendor partition

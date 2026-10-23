@@ -1,0 +1,73 @@
+From 3a587a978660ce597d2c1284502222e92a556549 Mon Sep 17 00:00:00 2001
+From: build <build@local>
+Date: Fri, 23 Oct 2026 21:48:13 +0300
+Subject: [PATCH] pan/bi: fix derivatives on Mali-G71 (and the v6 CLPER lane
+ immediate)
+
+---
+ src/panfrost/compiler/bifrost/bi_quirks.h       |  7 ++++++-
+ src/panfrost/compiler/bifrost/bifrost_compile.c | 16 ++++++++++++++++
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/src/panfrost/compiler/bifrost/bi_quirks.h b/src/panfrost/compiler/bifrost/bi_quirks.h
+index 5305db6..c89a484 100644
+--- a/src/panfrost/compiler/bifrost/bi_quirks.h
++++ b/src/panfrost/compiler/bifrost/bi_quirks.h
+@@ -25,6 +25,10 @@
+ 
+ #define BIFROST_LIMITED_CLPER (1 << 1)
+ 
++/* CLPER reads zero from every lane (seen on G71 r0 of Exynos8895), so
++ * derivatives cannot be computed. */
++#define BIFROST_BROKEN_CLPER (1 << 2)
++
+ static inline unsigned
+ bifrost_get_quirks(uint64_t gpu_id)
+ {
+@@ -32,7 +36,8 @@ bifrost_get_quirks(uint64_t gpu_id)
+       (PAN_ARCH_MAJOR(gpu_id) << 4) | PAN_ARCH_MINOR(gpu_id);
+    switch (arch_maj_min) {
+    case 0x60: /* G71 */
+-      return BIFROST_NO_FP32_TRANSCENDENTALS | BIFROST_LIMITED_CLPER;
++      return BIFROST_NO_FP32_TRANSCENDENTALS | BIFROST_LIMITED_CLPER |
++             BIFROST_BROKEN_CLPER;
+    case 0x62: /* G72 */
+    case 0x70: /* G31 */
+       return BIFROST_LIMITED_CLPER;
+diff --git a/src/panfrost/compiler/bifrost/bifrost_compile.c b/src/panfrost/compiler/bifrost/bifrost_compile.c
+index d3ec0cc..47715e7 100644
+--- a/src/panfrost/compiler/bifrost/bifrost_compile.c
++++ b/src/panfrost/compiler/bifrost/bifrost_compile.c
+@@ -1489,6 +1489,13 @@ static bi_index
+ bi_clper(bi_builder *b, bi_index s0, bi_index s1, enum bi_lane_op lop)
+ {
+    if (b->shader->quirks & BIFROST_LIMITED_CLPER) {
++      /* The lane is used as a full 32-bit value here: an 8-bit immediate
++       * (bi_imm_u8) would be replicated to all four bytes, selecting no
++       * valid lane, so that the read returns zero. Keep only the lane.
++       */
++      if (s1.type == BI_INDEX_CONSTANT)
++         s1 = bi_imm_u32(bi_apply_swizzle(s1.value, s1.swizzle) & 0xff);
++
+       if (lop == BI_LANE_OP_XOR) {
+          bi_index lane_id = bi_fau(BIR_FAU_LANE_ID, false);
+          s1 = bi_lshift_xor_i32(b, lane_id, s1, bi_imm_u8(0));
+@@ -1514,6 +1521,15 @@ bi_emit_derivative(bi_builder *b, bi_index dst, nir_intrinsic_instr *instr,
+ 
+    unsigned sz = instr->def.bit_size;
+ 
++   /* CLPER returns zero for every lane on G71: rather than +/- the value
++    * itself, which makes fwidth()-based antialiasing produce half
++    * transparent shapes, return no derivative at all (hard edges).
++    */
++   if (b->shader->quirks & BIFROST_BROKEN_CLPER) {
++      bi_mov_i32_to(b, dst, bi_zero());
++      return;
++   }
++
+    /* If all uses are fabs, the sign of the derivative doesn't matter. This is
+     * inherently based on fine derivatives so we can't do it for coarse.
+     */
+-- 
+2.56.0
+

@@ -25,6 +25,13 @@ if [ "$(basename "$(readlink /sys/class/drm/renderD128/device/driver 2>/dev/null
 	# mainline kernel: the Mali GPU runs on Mesa's panfrost driver
 	[ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] &&
 		export __EGL_VENDOR_LIBRARY_FILENAMES=$egl/50_mesa.json
+	# Mesa with the Mali-G71 derivative fix (tools/mesa-g71): rounded
+	# corners in Firefox/GTK4 are drawn as half transparent blocks without it
+	m=/opt/mesa-g71
+	if [ -f $m/share/glvnd/egl_vendor.d/50_mesa.json ]; then
+		export LD_LIBRARY_PATH=$m/lib:$LD_LIBRARY_PATH GBM_BACKENDS_PATH=$m/lib/gbm
+		export __EGL_VENDOR_LIBRARY_FILENAMES=$m/share/glvnd/egl_vendor.d/50_mesa.json
+	fi
 else
 	export GALLIUM_DRIVER=llvmpipe
 	[ -z "$WLR_RENDERER" ] && [ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] &&
