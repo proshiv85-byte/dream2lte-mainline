@@ -1,0 +1,2 @@
+# let the video group set the screen brightness (armtix-brightness, waybar)
+ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp video /sys%p/brightness", RUN+="/bin/chmod g+w /sys%p/brightness"

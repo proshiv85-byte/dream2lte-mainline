@@ -1,0 +1,16 @@
+# ~/.bashrc: interactive shells (foot). Prompt in the dusk colors.
+[[ $- != *i* ]] && return
+
+alias ls='ls --color=auto'
+alias ll='ls -lh --color=auto'
+alias grep='grep --color=auto'
+HISTSIZE=5000
+HISTCONTROL=ignoreboth
+shopt -s histappend checkwinsize
+
+__dusk_prompt() {
+	local s=$? c='\[\e[38;2;232;117;143m\]'
+	[ $s -ne 0 ] && c='\[\e[38;2;240;113;120m\]'
+	PS1='\[\e[38;2;180;164;242m\]\u\[\e[38;2;110;103;135m\] on \[\e[38;2;244;169;140m\]\h \[\e[38;2;127;209;199m\]\w\n'"$c"'❯\[\e[0m\] '
+}
+PROMPT_COMMAND=__dusk_prompt

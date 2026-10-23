@@ -1,0 +1,94 @@
+/* armtix dusk: palette in ~/.config/sway/theme */
+@define-color base #0f0c18;
+@define-color surface #1b1728;
+@define-color overlay #2a2440;
+@define-color line #3b3456;
+@define-color dim #6e6787;
+@define-color muted #9a93b0;
+@define-color text #e4def0;
+@define-color bright #f6f2fb;
+@define-color lavender #b4a4f2;
+@define-color peach #f4a98c;
+@define-color rose #e8758f;
+@define-color gold #ffd59e;
+@define-color teal #7fd1c7;
+@define-color green #a8d8a0;
+
+* {
+	font-family: "JetBrains Mono", "Symbols Nerd Font";
+	font-size: 12px;
+	font-weight: 600;
+	min-height: 0;
+	border: none;
+	border-radius: 0;
+	box-shadow: none;
+}
+
+window#waybar { background: transparent; color: @text; }
+
+/* the pills */
+#workspaces, #clock, #status,
+window#waybar.dock .modules-center {
+	background: alpha(@base, 0.82);
+	border: 1px solid alpha(@line, 0.9);
+	border-radius: 15px;
+}
+
+#workspaces { padding: 0 4px; }
+#workspaces button {
+	padding: 0 4px;
+	color: @dim;
+	background: transparent;
+	font-size: 12px;
+}
+#workspaces button.focused { color: @lavender; }
+#workspaces button.urgent { color: @rose; }
+
+#clock {
+	padding: 0 14px;
+	color: @bright;
+	font-weight: 800;
+	font-size: 13px;
+}
+
+#status { padding: 0 6px; }
+#network, #pulseaudio, #custom-brightness, #custom-battery {
+	padding: 0 6px;
+	font-size: 14px;
+}
+#network { color: @teal; }
+#network.disconnected, #network.disabled { color: @dim; }
+#pulseaudio { color: @lavender; }
+#pulseaudio.muted { color: @dim; }
+#custom-brightness { color: @gold; }
+#custom-battery { color: @green; font-size: 12px; }
+#custom-battery.charging, #custom-battery.full { color: @peach; }
+#custom-battery.low { color: @gold; }
+#custom-battery.critical { color: @rose; }
+
+/* dock */
+window#waybar.dock .modules-center {
+	border-radius: 22px;
+	padding: 0 6px;
+}
+#custom-apps, #custom-keyboard, #custom-rotate, #custom-close, #custom-power {
+	font-size: 20px;
+	color: @muted;
+	padding: 0 16px;
+	margin: 4px 0;
+	border-radius: 18px;
+}
+#custom-apps { color: @lavender; }
+#custom-power { color: @rose; }
+#custom-apps:hover, #custom-keyboard:hover, #custom-rotate:hover,
+#custom-close:hover, #custom-power:hover {
+	background: alpha(@overlay, 0.9);
+	color: @bright;
+}
+
+tooltip {
+	background: @surface;
+	border: 1px solid @line;
+	border-radius: 10px;
+}
+tooltip label { color: @text; font-weight: 500; }

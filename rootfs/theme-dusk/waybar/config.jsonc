@@ -1,0 +1,83 @@
+// Theme "dusk": floating pills. Status on top (workspaces, clock, status
+// icons), a dock of large touch buttons at the bottom.
+[
+{
+	"name": "status",
+	"layer": "top",
+	"position": "top",
+	"height": 30,
+	"margin-top": 6,
+	"margin-left": 8,
+	"margin-right": 8,
+	"spacing": 6,
+	"modules-left": ["sway/workspaces"],
+	"modules-center": ["clock"],
+	"modules-right": ["group/status"],
+
+	"sway/workspaces": {
+		"format": "{icon}",
+		"format-icons": { "focused": "●", "urgent": "◆", "default": "○" },
+		"disable-scroll": true
+	},
+	"clock": {
+		"format": "{:%H:%M}",
+		"format-alt": "{:%a %d %b}",
+		"tooltip": false
+	},
+	"group/status": {
+		"orientation": "horizontal",
+		"modules": ["network", "pulseaudio", "custom/brightness", "custom/battery"]
+	},
+	"network": {
+		"interface": "wlan0",
+		"format": "󰤮",
+		"format-wifi": "{icon}",
+		"format-icons": ["󰤯", "󰤟", "󰤢", "󰤥", "󰤨"],
+		"format-disconnected": "󰤮",
+		"format-disabled": "󰤮",
+		"tooltip-format-wifi": "{essid} {signalStrength}%\n{ipaddr}",
+		"on-click": "armtix-wifi"
+	},
+	"pulseaudio": {
+		"format": "{icon}",
+		"format-muted": "󰖁",
+		"format-icons": ["󰕿", "󰖀", "󰕾"],
+		"tooltip-format": "volume {volume}%",
+		"on-click": "armtix-volume mute",
+		"on-scroll-up": "armtix-volume up",
+		"on-scroll-down": "armtix-volume down"
+	},
+	// waybar's backlight module finds no device with libudev-zero
+	"custom/brightness": {
+		"exec": "armtix-brightness status",
+		"return-type": "json",
+		"interval": 30,
+		"signal": 8,
+		"on-click": "armtix-brightness cycle",
+		"on-scroll-up": "armtix-brightness up",
+		"on-scroll-down": "armtix-brightness down"
+	},
+	"custom/battery": {
+		"exec": "armtix-battery",
+		"return-type": "json",
+		"interval": 20
+	}
+},
+{
+	"name": "dock",
+	"layer": "top",
+	"position": "bottom",
+	"height": 44,
+	"margin-bottom": 8,
+	"margin-left": 40,
+	"margin-right": 40,
+	"spacing": 0,
+	"modules-center": ["custom/apps", "custom/keyboard", "custom/rotate", "custom/close", "custom/power"],
+
+	"custom/apps":     { "format": "󰀻", "tooltip": false, "on-click": "fuzzel" },
+	"custom/keyboard": { "format": "󰌌", "tooltip": false, "on-click": "armtix-osk toggle" },
+	"custom/rotate":   { "format": "󰑵", "tooltip": false, "on-click": "armtix-rotate next" },
+	"custom/close":    { "format": "󰅖", "tooltip": false, "on-click": "swaymsg kill" },
+	"custom/power":    { "format": "󰐥", "tooltip": false, "on-click": "armtix-power-menu" }
+}
+]

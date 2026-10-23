@@ -1,0 +1,23 @@
+# Theme "dusk" (plum night, peach sun, lavender accents): sway part.
+# Installed by armtix-theme, included from ~/.config/sway/config.
+# palette: crust #0b0913  base #0f0c18  surface #1b1728  overlay #2a2440
+#          line #3b3456  dim #6e6787  muted #9a93b0  text #e4def0
+#          bright #f6f2fb  lavender #b4a4f2  peach #f4a98c  rose #e8758f
+#          gold #ffd59e  teal #7fd1c7  green #a8d8a0  red #f07178
+output $out bg ~/.config/sway/wallpaper.png fill #0f0c18
+font pango:JetBrains Mono SemiBold 8
+default_border pixel 2
+default_floating_border pixel 2
+titlebar_padding 10 5
+titlebar_border_thickness 0
+title_align center
+gaps inner 6
+gaps outer 3
+smart_gaps off
+hide_edge_borders none
+#                       border  bg      text    indicator child_border
+client.focused          #b4a4f2 #2a2440 #f6f2fb #f4a98c   #b4a4f2
+client.focused_inactive #2a2440 #1b1728 #9a93b0 #2a2440   #2a2440
+client.unfocused        #1b1728 #15121f #6e6787 #1b1728   #1b1728
+client.urgent           #e8758f #3a1f2c #f6f2fb #e8758f   #e8758f
+client.background       #0f0c18

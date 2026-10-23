@@ -1,0 +1,27 @@
+#!/bin/sh
+# armtix-brightness up|down|cycle|set PERCENT|restore|status  - screen brightness
+# (/sys/class/backlight). The level is remembered across reboots.
+B=$(ls -d /sys/class/backlight/* 2>/dev/null | head -1)
+[ -n "$B" ] || { echo "armtix-brightness: no backlight" >&2; exit 1; }
+S=${XDG_STATE_HOME:-$HOME/.local/state}/armtix-brightness
+max=$(cat "$B/max_brightness")
+pct=$(( $(cat "$B/brightness") * 100 / max ))
+case $1 in
+	up)      n=$((pct + 10)) ;;
+	down)    n=$((pct - 10)) ;;
+	cycle)   if [ $pct -lt 25 ]; then n=40; elif [ $pct -lt 55 ]; then n=70
+	         elif [ $pct -lt 85 ]; then n=100; else n=10; fi ;;
+	set)     n=${2:-100} ;;
+	restore) n=$(cat "$S" 2>/dev/null) || exit 0 ;;
+	status)  # waybar custom module (JSON)
+	         if [ $pct -lt 34 ]; then i=󰃞; elif [ $pct -lt 67 ]; then i=󰃟; else i=󰃠; fi
+	         printf '{"text":"%s","tooltip":"Brightness %s%%"}\n' "$i" $pct
+	         exit 0 ;;
+	*) echo "usage: $0 up|down|cycle|set PERCENT|restore|status" >&2; exit 1 ;;
+esac
+[ "$n" -gt 100 ] && n=100
+[ "$n" -lt 1 ] && n=1
+echo $((n * max / 100)) > "$B/brightness" || exit 1
+mkdir -p "$(dirname "$S")" && echo $n > "$S"
+pkill -RTMIN+8 -x waybar 2>/dev/null
+exit 0
