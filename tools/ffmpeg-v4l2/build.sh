@@ -14,6 +14,7 @@ set -e
 T=$(cd "$(dirname "$0")" && pwd)
 W=${WORK:-$T/../../out/ffmpeg-v4l2}
 PH=${PH:-ssh root@172.16.42.1}
+export PH
 mkdir -p "$W" && cd "$W"
 
 # version and configure options of the phone's FFmpeg
@@ -21,19 +22,10 @@ $PH 'ffmpeg -hide_banner -buildconf' > buildconf.txt 2>&1
 V=$($PH "pacman -Q ffmpeg" | sed 's/.*:\([0-9.]*\)-.*/\1/')
 echo "phone FFmpeg $V"
 
-# sysroot: the phone's libraries and headers. The cross linker has no
-# sysroot support, so linker scripts get relative paths.
-if [ ! -d sysroot/usr/lib ]; then
-	mkdir -p sysroot
-	$PH 'tar -C / -cf - --exclude=usr/lib/firefox --exclude="usr/lib/python3*" \
-		--exclude=usr/lib/modules --exclude=usr/lib/firmware --exclude=usr/lib/gcc \
-		--exclude="usr/lib/libLLVM*" --exclude="usr/lib/libgallium*" \
-		usr/include usr/lib usr/share/pkgconfig 2>/dev/null' | tar -C sysroot -xf -
-	ln -sfn usr/lib sysroot/lib; ln -sfn usr/lib sysroot/lib64; ln -sfn lib sysroot/usr/lib64
-	for f in $(grep -l "GROUP\|INPUT" $(find sysroot/usr/lib -maxdepth 1 -name "*.so" -size -4k -type f)); do
-		sed -i -E 's#(/usr)?/lib(64)?/##g' "$f"
-	done
-fi
+# the phone's libraries and headers (shared with tools/mesa-g71)
+S=${SYSROOT:-$T/../../out/sysroot}
+"$T"/../phone-sysroot.sh "$S"
+S=$(cd "$S" && pwd)
 
 # source with the patches
 if [ ! -d ffmpeg-$V ]; then
@@ -45,7 +37,6 @@ fi
 # changes libavcodec on this hardware
 DROP="--enable-avisynth|--enable-frei0r|--enable-ladspa|--enable-opencl|--enable-vapoursynth|--enable-amf"
 OPTS=$(sed -n '3,$p' buildconf.txt | grep -- '--' | grep -vxE "\s*($DROP)\s*" | tr -s ' \n' ' ')
-S=$W/sysroot
 export PKG_CONFIG_LIBDIR=$S/usr/lib/pkgconfig:$S/usr/share/pkgconfig PKG_CONFIG_SYSROOT_DIR=$S
 mkdir -p build && cd build
 [ -f config.h ] || ../ffmpeg-$V/configure $OPTS --enable-cross-compile --arch=aarch64 \

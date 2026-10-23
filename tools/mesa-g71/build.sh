@@ -9,22 +9,21 @@
 # drew half transparent blocks. With the patch they are zero on G71 (hard
 # edges, correct shapes). Needs on the PC: meson, ninja, clang, llvm, libclc,
 # spirv-llvm-translator (to build Mesa's CL kernel compilers natively) and an
-# aarch64-linux-gnu cross toolchain. The phone's libraries come from the
-# sysroot of tools/ffmpeg-v4l2/build.sh (run that first). Re-run after a Mesa
-# update on the phone.
+# aarch64-linux-gnu cross toolchain. The phone's libraries are copied to
+# out/sysroot (tools/phone-sysroot.sh). Re-run after a Mesa update on the
+# phone.
 set -e
 T=$(cd "$(dirname "$0")" && pwd)
 W=${WORK:-$T/../../out/mesa-g71}
-S=${SYSROOT:-$T/../../out/ffmpeg-v4l2/sysroot}
+S=${SYSROOT:-$T/../../out/sysroot}
 PH=${PH:-ssh root@172.16.42.1}
-[ -d "$S/usr/lib" ] || { echo "no sysroot in $S, run tools/ffmpeg-v4l2/build.sh first" >&2; exit 1; }
+export PH
+"$T"/../phone-sysroot.sh "$S"
 S=$(cd "$S" && pwd)
 mkdir -p "$W" && cd "$W"
 
 V=$($PH "pacman -Q mesa" | sed 's/.*:\([0-9.]*\)-.*/\1/')
 echo "phone Mesa $V"
-[ -d "$S/usr/share/wayland-protocols" ] ||
-	$PH 'tar -C / -cf - usr/share/wayland-protocols usr/share/wayland' | tar -C "$S" -xf -
 
 if [ ! -d mesa-$V ]; then
 	curl -fL https://archive.mesa3d.org/mesa-$V.tar.xz | tar -xJf -
