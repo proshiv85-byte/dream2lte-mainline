@@ -1,7 +1,7 @@
 From 7ee2136852ce0e7b13687091a73c6e5bbbeb57ae Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Wed, 21 Oct 2026 20:28:56 +0300
-Subject: [PATCH 02/16] WIP: Exynos8895 USB DRD PHY + DWC3 glue, dream2lte USB
+Subject: [PATCH 02/19] WIP: Exynos8895 USB DRD PHY + DWC3 glue, dream2lte USB
  gadget, MUIC i2c bus
 
 Work in progress, to be split into proper patches.

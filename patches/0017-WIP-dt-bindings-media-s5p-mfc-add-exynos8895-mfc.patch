@@ -1,0 +1,22 @@
+From 1f1c7416f823f1e8f976ce48df127c06c40d09f3 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Fri, 23 Oct 2026 18:15:52 +0300
+Subject: [PATCH 17/19] WIP: dt-bindings: media: s5p-mfc: add exynos8895-mfc
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ Documentation/devicetree/bindings/media/samsung,s5p-mfc.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/media/samsung,s5p-mfc.yaml b/Documentation/devicetree/bindings/media/samsung,s5p-mfc.yaml
+index b46cc7807..6f2fda0ce 100644
+--- a/Documentation/devicetree/bindings/media/samsung,s5p-mfc.yaml
++++ b/Documentation/devicetree/bindings/media/samsung,s5p-mfc.yaml
+@@ -24,6 +24,7 @@ properties:
+           - samsung,mfc-v7                # Exynos5420
+           - samsung,mfc-v8                # Exynos5800
+           - samsung,mfc-v10               # Exynos7880
++          - samsung,exynos8895-mfc        # Exynos8895
+           - tesla,fsd-mfc                 # Tesla FSD
+       - items:
+           - enum:

@@ -23,5 +23,7 @@ esac
 [ "$n" -lt 1 ] && n=1
 echo $((n * max / 100)) > "$B/brightness" || exit 1
 mkdir -p "$(dirname "$S")" && echo $n > "$S"
-pkill -RTMIN+8 -x waybar 2>/dev/null
+# refresh the waybar module; not at session start: a waybar that has not
+# set up its signal handlers yet would be killed by the signal
+[ "$1" = restore ] || pkill -RTMIN+8 -x waybar 2>/dev/null
 exit 0

@@ -31,7 +31,8 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | RTC | works (S2MPS17, through the APM firmware) |
 | Reboot, reboot to recovery | works; hardware watchdog available |
 | Power off | wired up, not tested yet |
-| Bluetooth, audio, GPU, cameras, modem, USB 3 / host, suspend | not supported yet |
+| Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; Firefox can't use it yet (needs an FFmpeg with DRM-PRIME output for V4L2) |
+| Bluetooth, audio, cameras, modem, USB 3 / host, suspend | not supported yet |
 
 ## What's in the patches
 
@@ -66,6 +67,8 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
   MUIC), battery temperature limits like the vendor kernel, and the
   charger's watchdog cleared regularly (without it, charging stopped about
   a minute and a half after boot); USB routing of the MUIC
+- video codec: MFC v11 support for `s5p-mfc` (v10 interface; firmware start,
+  buffer sizes, keyframe and timestamp fixes, single-buffer NV12 output)
 - ADC: Exynos8895 variant of `exynos_adc`; the battery, charger and USB
   connector thermistors are read through it with `generic-adc-thermal`
 - `stmfts`: FTS8 variant (`st,stmfts8`)
@@ -142,6 +145,17 @@ Install it as `/usr/lib/firmware/exynos8895_acpm_dvfs.fw` (`tools/flash-ssh.sh`
 does that). Without it the CPUs stay at the bootloader's clocks, about half
 of their top speed.
 
+### Video decoder firmware
+
+The MFC firmware is `firmware/mfc_fw.bin` on the phone's VENDOR partition.
+Install it as `/usr/lib/firmware/s5p-mfc-v11.fw`:
+
+```sh
+mount -o ro,noload /dev/disk/by-partlabel/VENDOR /mnt
+cp /mnt/firmware/mfc_fw.bin /usr/lib/firmware/s5p-mfc-v11.fw
+umount /mnt
+```
+
 ### WiFi firmware
 
 The WiFi firmware is Samsung's and comes from the phone's vendor partition
@@ -187,8 +201,7 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
   current low card clock
 - [`rootfs/firefox-user.js`](rootfs/firefox-user.js): Firefox settings for
   the phone (copy to the profile as `user.js`): pinch zoom in and out with
-  phone-style page layout, and the unoptimized WebRender shaders (the
-  optimized ones draw rounded corners as blocks on Mali GPUs)
+  phone-style page layout
 - [`rootfs/init-wrapper`](rootfs/init-wrapper): bring-up helper used with
   `DEV=1` builds; collects logs and returns to TWRP if USB networking does not
   come up

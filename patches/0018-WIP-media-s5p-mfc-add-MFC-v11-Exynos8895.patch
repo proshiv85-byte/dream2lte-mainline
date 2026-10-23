@@ -1,0 +1,315 @@
+From fd8055e6cd041cc8a13ca99a9763767437994680 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Fri, 23 Oct 2026 18:15:53 +0300
+Subject: [PATCH 18/19] WIP: media: s5p-mfc: add MFC v11 (Exynos8895)
+
+The Exynos8895 MFC (Samsung's "v11", version register 0x1100) has the
+v10 interface and formats. Variant with the vendor kernel's context
+buffer sizes and the firmware as s5p-mfc-v11.fw (mfc_fw.bin of the
+vendor partition). Fixes needed on top of the v10 support:
+
+- the bus reset is left set (by the bootloader, or by the reset done
+  on an earlier failure) and the MFC reset does not release it: the
+  firmware could not be fetched. Release it after the reset (v10/v11).
+- the firmware has to be reloaded for every run, as on v12, or
+  SYS_INIT fails the second time.
+- H.264 MV buffers need the 1024 byte offset (as on v12): INIT_BUFFERS
+  failed with error 0x3c.
+- the stream buffer must be at least 1 MiB: smaller ones, which FFmpeg
+  allocates for small videos, fail header parsing (error 0x37).
+- on v10+ the buffer holding the header is kept when the header is
+  followed by a frame, for all codecs and not only H.264: HEVC, VP8 and
+  VP9 lost their first keyframe.
+- timestamps are also copied for frames decoded but displayed later
+  (reordering), which got none; FFmpeg users like Firefox gave up.
+- NV12 in a single buffer (chroma at bytesperline * height) as decoder
+  output on v10+, listed first: Firefox's V4L2 support only takes it.
+
+Verified with FFmpeg's *_v4l2m2m decoders: H.264, HEVC, VP8 and VP9
+output is identical to software decoding, 320x240 to 1080p; 1080p
+H.264 decodes at ~245 fps with ~18% of one CPU.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../platform/samsung/s5p-mfc/regs-mfc-v10.h   |  6 +++
+ .../media/platform/samsung/s5p-mfc/s5p_mfc.c  | 52 +++++++++++++++++--
+ .../platform/samsung/s5p-mfc/s5p_mfc_common.h |  8 +++
+ .../platform/samsung/s5p-mfc/s5p_mfc_ctrl.c   | 11 +++-
+ .../platform/samsung/s5p-mfc/s5p_mfc_dec.c    | 40 ++++++++++++--
+ .../platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c |  3 +-
+ 6 files changed, 111 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/media/platform/samsung/s5p-mfc/regs-mfc-v10.h b/drivers/media/platform/samsung/s5p-mfc/regs-mfc-v10.h
+index fadd9139b..80daafcfb 100644
+--- a/drivers/media/platform/samsung/s5p-mfc/regs-mfc-v10.h
++++ b/drivers/media/platform/samsung/s5p-mfc/regs-mfc-v10.h
+@@ -55,6 +55,12 @@
+ #define MFC_VERSION_V10		0xA0
+ #define MFC_NUM_PORTS_V10	1
+ 
++/* MFC v11 (Exynos8895): v10 registers, larger context buffers */
++#define MFC_VERSION_V11			0xB0
++#define MFC_OTHER_DEC_CTX_BUF_SIZE_V11	(30 * SZ_1K)
++#define MFC_HEVC_ENC_CTX_BUF_SIZE_V11	(40 * SZ_1K)
++#define MFC_OTHER_ENC_CTX_BUF_SIZE_V11	(25 * SZ_1K)
++
+ /* MFCv10 codec defines*/
+ #define S5P_FIMV_CODEC_HEVC_DEC		17
+ #define S5P_FIMV_CODEC_VP9_DEC		18
+diff --git a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
+index 32eb402d4..06942d154 100644
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
+@@ -352,10 +352,16 @@ static void s5p_mfc_handle_frame_new(struct s5p_mfc_ctx *ctx, unsigned int err)
+ 			else
+ 				dst_buf->b->field =
+ 							V4L2_FIELD_INTERLACED;
+-			vb2_set_plane_payload(&dst_buf->b->vb2_buf, 0,
++			if (s5p_mfc_dst_contig(ctx)) {
++				vb2_set_plane_payload(&dst_buf->b->vb2_buf, 0,
++					s5p_mfc_dst_chroma_offset(ctx) +
++					ctx->chroma_size);
++			} else {
++				vb2_set_plane_payload(&dst_buf->b->vb2_buf, 0,
+ 						ctx->luma_size);
+-			vb2_set_plane_payload(&dst_buf->b->vb2_buf, 1,
++				vb2_set_plane_payload(&dst_buf->b->vb2_buf, 1,
+ 						ctx->chroma_size);
++			}
+ 			clear_bit(dst_buf->b->vb2_buf.index,
+ 							&ctx->dec_dst_flag);
+ 
+@@ -419,7 +425,12 @@ static void s5p_mfc_handle_frame(struct s5p_mfc_ctx *ctx,
+ 		}
+ 	}
+ 
+-	if (dec_frame_status == S5P_FIMV_DEC_STATUS_DECODING_DISPLAY)
++	/*
++	 * A frame was decoded, displayed now or (reordered) later: it gets
++	 * the timestamp of its source buffer either way.
++	 */
++	if (dec_frame_status == S5P_FIMV_DEC_STATUS_DECODING_DISPLAY ||
++	    dec_frame_status == S5P_FIMV_DEC_STATUS_DECODING_ONLY)
+ 		s5p_mfc_handle_frame_copy_time(ctx);
+ 
+ 	/* A frame has been decoded and is in the buffer  */
+@@ -545,8 +556,14 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
+ 		else
+ 			ctx->state = MFCINST_HEAD_PARSED;
+ 
++		/*
++		 * Keep the buffer if the header was followed by a frame in
++		 * it, which v10+ firmware leaves for the next decode for all
++		 * codecs (HEVC, VP8 and VP9 lost their first keyframe).
++		 */
+ 		if ((ctx->codec_mode == S5P_MFC_CODEC_H264_DEC ||
+-			ctx->codec_mode == S5P_MFC_CODEC_H264_MVC_DEC) &&
++			ctx->codec_mode == S5P_MFC_CODEC_H264_MVC_DEC ||
++			IS_MFCV10_PLUS(dev)) &&
+ 				!list_empty(&ctx->src_queue)) {
+ 			struct s5p_mfc_buf *src_buf;
+ 
+@@ -1680,6 +1697,30 @@ static const struct s5p_mfc_variant mfc_drvdata_v10 = {
+ 	.fw_name[0]     = "s5p-mfc-v10.fw",
+ };
+ 
++static const struct s5p_mfc_buf_size_v6 mfc_buf_size_v11 = {
++	.dev_ctx        = MFC_CTX_BUF_SIZE_V10,
++	.h264_dec_ctx   = MFC_H264_DEC_CTX_BUF_SIZE_V10,
++	.other_dec_ctx  = MFC_OTHER_DEC_CTX_BUF_SIZE_V11,
++	.h264_enc_ctx   = MFC_H264_ENC_CTX_BUF_SIZE_V10,
++	.hevc_enc_ctx   = MFC_HEVC_ENC_CTX_BUF_SIZE_V11,
++	.other_enc_ctx  = MFC_OTHER_ENC_CTX_BUF_SIZE_V11,
++};
++
++static const struct s5p_mfc_buf_size buf_size_v11 = {
++	.fw     = MAX_FW_SIZE_V10,
++	.cpb    = MAX_CPB_SIZE_V10,
++	.priv   = &mfc_buf_size_v11,
++};
++
++/* MFC v11 of Exynos8895: the v10 interface, same formats */
++static const struct s5p_mfc_variant mfc_drvdata_v11 = {
++	.version        = MFC_VERSION_V11,
++	.version_bit    = MFC_V10_BIT,
++	.port_num       = MFC_NUM_PORTS_V10,
++	.buf_size       = &buf_size_v11,
++	.fw_name[0]     = "s5p-mfc-v11.fw",
++};
++
+ static struct s5p_mfc_buf_size_v6 mfc_buf_size_v12 = {
+ 	.dev_ctx        = MFC_CTX_BUF_SIZE_V12,
+ 	.h264_dec_ctx   = MFC_H264_DEC_CTX_BUF_SIZE_V12,
+@@ -1727,6 +1768,9 @@ static const struct of_device_id exynos_mfc_match[] = {
+ 	}, {
+ 		.compatible = "samsung,mfc-v10",
+ 		.data = &mfc_drvdata_v10,
++	}, {
++		.compatible = "samsung,exynos8895-mfc",
++		.data = &mfc_drvdata_v11,
+ 	}, {
+ 		.compatible = "tesla,fsd-mfc",
+ 		.data = &mfc_drvdata_v12,
+diff --git a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
+index 58dc17680..8f2e6a7fc 100644
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
+@@ -790,6 +790,14 @@ void s5p_mfc_cleanup_queue(struct list_head *lh, struct vb2_queue *vq);
+ #define IS_MFCV8_PLUS(dev)	((dev)->variant->version >= 0x80)
+ #define IS_MFCV10_PLUS(dev)	((dev)->variant->version >= 0xA0)
+ #define IS_MFCV12(dev)		((dev)->variant->version >= 0xC0)
++#define IS_MFCV11(dev)		((dev)->variant->version == 0xB0)
++
++/*
++ * Decoded frames in a single buffer (V4L2_PIX_FMT_NV12): the chroma plane
++ * follows the luma plane at bytesperline * height, as applications expect.
++ */
++#define s5p_mfc_dst_contig(ctx)	((ctx)->dst_fmt->num_planes == 1)
++#define s5p_mfc_dst_chroma_offset(ctx)	((ctx)->stride[0] * (ctx)->buf_height)
+ #define FW_HAS_E_MIN_SCRATCH_BUF(dev) (IS_MFCV10_PLUS(dev))
+ 
+ #define MFC_V5_BIT	BIT(0)
+diff --git a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c
+index 625d77b2b..279dca8c9 100644
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c
+@@ -55,8 +55,9 @@ int s5p_mfc_load_firmware(struct s5p_mfc_dev *dev)
+ 	 * incorrect firmware transfer and therefore it is not able to initialize
+ 	 * the hardware. This causes failed response for SYS_INIT command when
+ 	 * MFC runs for second time. So, load the MFC v12 firmware for each run.
++	 * The same goes for MFC v11.
+ 	 */
+-	if (!IS_MFCV12(dev))
++	if (!IS_MFCV12(dev) && !IS_MFCV11(dev))
+ 		if (dev->fw_get_done)
+ 			return 0;
+ 
+@@ -148,6 +149,14 @@ int s5p_mfc_reset(struct s5p_mfc_dev *dev)
+ 
+ 		mfc_write(dev, 0x1FFF, S5P_FIMV_MFC_RESET_V6);
+ 		mfc_write(dev, 0, S5P_FIMV_MFC_RESET_V6);
++
++		/*
++		 * The MFC reset does not release the bus reset, which was
++		 * set above or is left set by the bootloader (Exynos8895):
++		 * the firmware could not be fetched.
++		 */
++		if (IS_MFCV10_PLUS(dev) && !IS_MFCV12(dev))
++			mfc_write(dev, 0, S5P_FIMV_MFC_BUS_RESET_CTRL);
+ 	} else {
+ 		/* Stop procedure */
+ 		/*  reset RISC */
+diff --git a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
+index afd28beab..ed0a988e4 100644
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
+@@ -42,6 +42,17 @@ static const struct s5p_mfc_fmt formats[] = {
+ 		.num_planes	= 2,
+ 		.versions	= MFC_V5_BIT,
+ 	},
++	/*
++	 * Listed first, so that applications that take the first format
++	 * (FFmpeg) get a single buffer, which some (Firefox) require.
++	 */
++	{
++		.fourcc		= V4L2_PIX_FMT_NV12,
++		.codec_mode	= S5P_MFC_CODEC_NONE,
++		.type		= MFC_FMT_RAW,
++		.num_planes	= 1,
++		.versions	= MFC_V10PLUS_BITS,
++	},
+ 	{
+ 		.fourcc		= V4L2_PIX_FMT_NV12M,
+ 		.codec_mode	= S5P_MFC_CODEC_NONE,
+@@ -377,6 +388,9 @@ static int vidioc_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
+ 		pix_mp->plane_fmt[0].sizeimage = ctx->luma_size;
+ 		pix_mp->plane_fmt[1].bytesperline = ctx->stride[1];
+ 		pix_mp->plane_fmt[1].sizeimage = ctx->chroma_size;
++		if (s5p_mfc_dst_contig(ctx))
++			pix_mp->plane_fmt[0].sizeimage =
++				s5p_mfc_dst_chroma_offset(ctx) + ctx->chroma_size;
+ 		if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_YUV420M || ctx->dst_fmt->fourcc ==
+ 				V4L2_PIX_FMT_YVU420M) {
+ 			pix_mp->plane_fmt[2].bytesperline = ctx->stride[2];
+@@ -476,6 +490,13 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
+ 			ctx->dec_src_buf_size = buf_size->cpb;
+ 		else
+ 			ctx->dec_src_buf_size = pix_mp->plane_fmt[0].sizeimage;
++		/*
++		 * The MFC v11 firmware fails to parse the header (error 0x37)
++		 * from stream buffers smaller than this, which applications
++		 * request for small videos.
++		 */
++		if (IS_MFCV11(dev) && ctx->dec_src_buf_size < SZ_1M)
++			pix_mp->plane_fmt[0].sizeimage = ctx->dec_src_buf_size = SZ_1M;
+ 		pix_mp->plane_fmt[0].bytesperline = 0;
+ 		ctx->state = MFCINST_INIT;
+ 		ret = 0;
+@@ -961,7 +982,7 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
+ 			mfc_err("invalid format\n");
+ 			return -EINVAL;
+ 		}
+-		*plane_count = format->comp_planes;
++		*plane_count = format->mem_planes;
+ 
+ 		/* Setup buffer count */
+ 		if (*buf_count < ctx->pb_count)
+@@ -981,6 +1002,8 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
+ 	    vq->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+ 		psize[0] = ctx->luma_size;
+ 		psize[1] = ctx->chroma_size;
++		if (s5p_mfc_dst_contig(ctx))
++			psize[0] = s5p_mfc_dst_chroma_offset(ctx) + ctx->chroma_size;
+ 		if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_YUV420M || ctx->dst_fmt->fourcc ==
+ 				V4L2_PIX_FMT_YVU420M)
+ 			psize[2] = ctx->chroma_size_1;
+@@ -1019,7 +1042,13 @@ static int s5p_mfc_buf_init(struct vb2_buffer *vb)
+ 				return -EINVAL;
+ 			}
+ 		}
+-		if (vb2_plane_size(vb, 0) < ctx->luma_size ||
++		if (s5p_mfc_dst_contig(ctx)) {
++			if (vb2_plane_size(vb, 0) <
++			    s5p_mfc_dst_chroma_offset(ctx) + ctx->chroma_size) {
++				mfc_err("Plane buffer (CAPTURE) is too small\n");
++				return -EINVAL;
++			}
++		} else if (vb2_plane_size(vb, 0) < ctx->luma_size ||
+ 			vb2_plane_size(vb, 1) < ctx->chroma_size) {
+ 			mfc_err("Plane buffer (CAPTURE) is too small\n");
+ 			return -EINVAL;
+@@ -1035,7 +1064,12 @@ static int s5p_mfc_buf_init(struct vb2_buffer *vb)
+ 		ctx->dst_bufs[i].b = vbuf;
+ 		ctx->dst_bufs[i].cookie.raw.luma =
+ 					vb2_dma_contig_plane_dma_addr(vb, 0);
+-		ctx->dst_bufs[i].cookie.raw.chroma =
++		if (s5p_mfc_dst_contig(ctx))
++			ctx->dst_bufs[i].cookie.raw.chroma =
++				ctx->dst_bufs[i].cookie.raw.luma +
++				s5p_mfc_dst_chroma_offset(ctx);
++		else
++			ctx->dst_bufs[i].cookie.raw.chroma =
+ 					vb2_dma_contig_plane_dma_addr(vb, 1);
+ 		if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_YUV420M || ctx->dst_fmt->fourcc ==
+ 				V4L2_PIX_FMT_YVU420M) {
+diff --git a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c
+index 98f8292b3..5e0f2b56f 100644
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c
+@@ -494,6 +494,7 @@ static void s5p_mfc_dec_calc_dpb_size_v6(struct s5p_mfc_ctx *ctx)
+ 			ctx->img_height, ctx->buf_width, ctx->buf_height);
+ 
+ 	switch (ctx->dst_fmt->fourcc) {
++	case V4L2_PIX_FMT_NV12:
+ 	case V4L2_PIX_FMT_NV12M:
+ 	case V4L2_PIX_FMT_NV21M:
+ 		ctx->stride[0] = ALIGN(ctx->img_width, S5P_FIMV_NV12MT_HALIGN_V6);
+@@ -521,7 +522,7 @@ static void s5p_mfc_dec_calc_dpb_size_v6(struct s5p_mfc_ctx *ctx)
+ 
+ 	if (ctx->codec_mode == S5P_MFC_CODEC_H264_DEC ||
+ 			ctx->codec_mode == S5P_MFC_CODEC_H264_MVC_DEC) {
+-		if (IS_MFCV12(dev))
++		if (IS_MFCV12(dev) || IS_MFCV11(dev))
+ 			ctx->mv_size = S5P_MFC_DEC_MV_SIZE(ctx->img_width, ctx->img_height, 1024);
+ 		else if (IS_MFCV10_PLUS(dev))
+ 			ctx->mv_size = S5P_MFC_DEC_MV_SIZE(ctx->img_width, ctx->img_height, 512);
