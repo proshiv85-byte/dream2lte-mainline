@@ -185,6 +185,10 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
   the microSD card read-only (my card's data must not be touched; drop that
   line if you want to write to yours) and keeps requests short enough for the
   current low card clock
+- [`rootfs/firefox-user.js`](rootfs/firefox-user.js): Firefox settings for
+  the phone (copy to the profile as `user.js`): pinch zoom in and out with
+  phone-style page layout, and the unoptimized WebRender shaders (the
+  optimized ones draw rounded corners as blocks on Mali GPUs)
 - [`rootfs/init-wrapper`](rootfs/init-wrapper): bring-up helper used with
   `DEV=1` builds; collects logs and returns to TWRP if USB networking does not
   come up
