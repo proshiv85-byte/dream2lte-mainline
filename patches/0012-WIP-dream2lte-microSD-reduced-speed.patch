@@ -1,7 +1,7 @@
 From b1cc8c12d0f1bb0234940c025ab9397dad3039bc Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 00:14:56 +0300
-Subject: [PATCH 12/19] WIP: dream2lte microSD (reduced speed)
+Subject: [PATCH 12/20] WIP: dream2lte microSD (reduced speed)
 
 S2MPS17 LDO2 (card I/O supply, off at boot) and the TFLASH_EN switched
 card supply, card detect, dw_mmc node. Data reads only work up to about

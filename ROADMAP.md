@@ -23,7 +23,7 @@ already works.
 |---|---|---|---|---|
 | 8 | **microSD above 7 MHz** | Reads at 3.3 MB/s; a normal card does 20+ MB/s. | M–L | Already ruled out: sample phases, clock source/divider, I/O voltage, drive strength, clock gating, FIFO quirk. Next: vendor dw_mmc init registers and tuning, the high-speed switch (CMD6), pin pulls. **Writes are off-limits on the current card**: write testing needs a spare card. |
 | 9 | **Power domains (G3D first)** | GPU and other blocks stay powered even when idle. | M | G3D PMU config 0x164840e0 / status 0x164840e4; vendor also turns PLL_G3D on in CMU_G3D. Mainline `exynos-pm-domains` may work with a new compatible. |
-| 10 | ~~Hardware video decode (MFC)~~ | **Done** in the kernel (H.264, HEVC, VP8, VP9 via V4L2). | — | Follow-up: Firefox needs an FFmpeg whose V4L2 decoders output DRM-PRIME (Raspberry Pi patches); a player (mpv) works with upstream FFmpeg. Encoder untested. |
+| 10 | ~~Hardware video decode (MFC)~~ | **Done** (H.264, HEVC, VP8, VP9 via V4L2; Firefox H.264/HEVC with the patched libavcodec). | — | Follow-ups: VP9 in Firefox (its bundled decoder has no V4L2), the encoder (untested). |
 | 11 | **GPU AFBC warning** | Mesa prints "Tile size is smaller than AFBC superblock"; harmless so far. | S | Check Mesa's panfrost AFBC handling for G71 / disable AFBC for scanout. |
 
 ## Bigger hardware

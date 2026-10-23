@@ -1,0 +1,32 @@
+From b91c68d9dd5c98a940a3574a0438ecbf91a23539 Mon Sep 17 00:00:00 2001
+From: build <build@local>
+Date: Fri, 23 Oct 2026 20:50:43 +0300
+Subject: [PATCH] libavcodec: v4l2m2m: keep timestamps without a time base
+
+---
+ libavcodec/v4l2_buffers.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/v4l2_buffers.c b/libavcodec/v4l2_buffers.c
+index af72a42..f468777 100644
+--- a/libavcodec/v4l2_buffers.c
++++ b/libavcodec/v4l2_buffers.c
+@@ -61,7 +61,14 @@ static inline AVRational v4l2_get_timebase(V4L2Buffer *avbuf)
+ 
+     if (s->avctx->pkt_timebase.num)
+         return s->avctx->pkt_timebase;
+-    return s->avctx->time_base;
++    /*
++     * Without a time base (Firefox sets none), keep the timestamps as they
++     * are, in the microseconds of the V4L2 buffers, instead of dividing by
++     * zero and losing them.
++     */
++    if (s->avctx->time_base.num && s->avctx->time_base.den)
++        return s->avctx->time_base;
++    return v4l2_timebase;
+ }
+ 
+ static inline void v4l2_set_pts(V4L2Buffer *out, int64_t pts)
+-- 
+2.56.0
+

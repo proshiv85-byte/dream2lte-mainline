@@ -31,7 +31,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | RTC | works (S2MPS17, through the APM firmware) |
 | Reboot, reboot to recovery | works; hardware watchdog available |
 | Power off | wired up, not tested yet |
-| Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; Firefox can't use it yet (needs an FFmpeg with DRM-PRIME output for V4L2) |
+| Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; in Firefox for H.264/HEVC with the patched libavcodec below (1080p at ~4% CPU); VP9 in Firefox still in software |
 | Bluetooth, audio, cameras, modem, USB 3 / host, suspend | not supported yet |
 
 ## What's in the patches
@@ -155,6 +155,24 @@ mount -o ro,noload /dev/disk/by-partlabel/VENDOR /mnt
 cp /mnt/firmware/mfc_fw.bin /usr/lib/firmware/s5p-mfc-v11.fw
 umount /mnt
 ```
+
+### Hardware video decoding in Firefox
+
+Firefox decodes through the system FFmpeg, but needs its V4L2 decoders to
+output DRM-PRIME frames (dmabufs), which Arch's FFmpeg doesn't do.
+[`tools/ffmpeg-v4l2/build.sh`](tools/ffmpeg-v4l2/build.sh) cross-compiles the
+phone's FFmpeg version with LibreELEC's v4l2-drmprime patches (plus a
+timestamp fix for Firefox) against a copy of the phone's libraries and the
+same configure options, checks that the exports match, and with `install`
+replaces only `libavcodec` on the phone (original kept in
+`/root/mainline/ffmpeg-orig`):
+
+```sh
+PH="ssh root@172.16.42.1" tools/ffmpeg-v4l2/build.sh install
+```
+
+An FFmpeg update from pacman overwrites it; run the script again after one.
+VP9 is decoded by Firefox's own bundled decoders, so it stays in software.
 
 ### WiFi firmware
 

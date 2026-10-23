@@ -1,0 +1,108 @@
+From ae570f837f55d674ad4e7707618f5fe4fa2d9848 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Fri, 23 Oct 2026 21:05:33 +0300
+Subject: [PATCH 20/20] WIP: media: s5p-mfc: let players restart and queue
+ frames (v10+)
+
+Fixes for Firefox (FFmpeg V4L2 decoding with DRM-PRIME frames):
+
+- allow up to 16 capture buffers beyond the DPB on v10+ instead of 5:
+  Firefox queues more decoded frames than that before showing them, so
+  the decoder starved and playback froze after a few frames.
+- implement V4L2_DEC_CMD_START, which restarts decoding after a drain
+  (loops and seeks); it was refused with -EINVAL.
+- at the end of a drain return a single empty capture buffer flagged
+  LAST and keep the others queued (v10+): applications restarting the
+  decoder do not requeue them, and it found no buffers to decode into.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../media/platform/samsung/s5p-mfc/s5p_mfc.c  |  8 ++++++
+ .../platform/samsung/s5p-mfc/s5p_mfc_common.h |  1 +
+ .../platform/samsung/s5p-mfc/s5p_mfc_dec.c    | 28 +++++++++++++++++--
+ 3 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
+index 06942d154..489dc907e 100644
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
+@@ -250,6 +250,14 @@ static void s5p_mfc_handle_frame_all_extracted(struct s5p_mfc_ctx *ctx)
+ 
+ 		ctx->dec_dst_flag &= ~(1 << dst_buf->b->vb2_buf.index);
+ 		vb2_buffer_done(&dst_buf->b->vb2_buf, VB2_BUF_STATE_DONE);
++
++		/*
++		 * One empty buffer marks the end of the stream; the others
++		 * stay queued for when decoding is restarted after the drain
++		 * (V4L2_DEC_CMD_START), which applications do not requeue.
++		 */
++		if (IS_MFCV10_PLUS(dev))
++			break;
+ 	}
+ }
+ 
+diff --git a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
+index 8f2e6a7fc..72258bd18 100644
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
+@@ -43,6 +43,7 @@
+ 
+ /* MFC definitions */
+ #define MFC_MAX_EXTRA_DPB       5
++#define MFC_MAX_EXTRA_DPB_V10	16
+ #define MFC_MAX_BUFFERS		32
+ #define MFC_NUM_CONTEXTS	4
+ /* Interrupt timeout */
+diff --git a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
+index ed0a988e4..32964413c 100644
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
+@@ -909,6 +909,22 @@ static int vidioc_decoder_cmd(struct file *file, void *priv,
+ 			spin_unlock_irqrestore(&dev->irqlock, flags);
+ 		}
+ 		break;
++	case V4L2_DEC_CMD_START:
++		if (cmd->flags != 0)
++			return -EINVAL;
++
++		/* resume decoding after a drain, as when streaming restarts */
++		spin_lock_irqsave(&dev->irqlock, flags);
++		if (ctx->state == MFCINST_FINISHING ||
++		    ctx->state == MFCINST_FINISHED)
++			ctx->state = MFCINST_RUNNING;
++		/* restarting the OUTPUT queue may have resumed already */
++		vb2_clear_last_buffer_dequeued(&ctx->vq_dst);
++		if (s5p_mfc_ctx_ready(ctx))
++			set_work_bit_irqsave(ctx);
++		spin_unlock_irqrestore(&dev->irqlock, flags);
++		s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
++		break;
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -961,6 +977,7 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
+ 	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(vq);
+ 	struct s5p_mfc_dev *dev = ctx->dev;
+ 	const struct v4l2_format_info *format;
++	unsigned int extra;
+ 
+ 	/* Video output for decoding (source)
+ 	 * this can be set after getting an instance */
+@@ -987,8 +1004,15 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
+ 		/* Setup buffer count */
+ 		if (*buf_count < ctx->pb_count)
+ 			*buf_count = ctx->pb_count;
+-		if (*buf_count > ctx->pb_count + MFC_MAX_EXTRA_DPB)
+-			*buf_count = ctx->pb_count + MFC_MAX_EXTRA_DPB;
++		/*
++		 * Players that queue decoded frames before showing them
++		 * (Firefox holds more than MFC_MAX_EXTRA_DPB) would starve
++		 * the decoder: allow more on v10+.
++		 */
++		extra = IS_MFCV10_PLUS(dev) ? MFC_MAX_EXTRA_DPB_V10 :
++					      MFC_MAX_EXTRA_DPB;
++		if (*buf_count > ctx->pb_count + extra)
++			*buf_count = ctx->pb_count + extra;
+ 		if (*buf_count > MFC_MAX_BUFFERS)
+ 			*buf_count = MFC_MAX_BUFFERS;
+ 	} else {
