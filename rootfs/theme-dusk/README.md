@@ -1,6 +1,6 @@
 # dusk theme for ARMtix
 
-Plum night, peach sun, lavender accents. A theme for `armtix-theme`: copy
+Minimal: dark grays, one muted peach accent, flat bars, square corners. A theme for `armtix-theme`: copy
 this folder to `~/.config/armtix-themes/dusk`, generate the wallpapers, then
 `armtix-theme dusk` (`armtix-theme minimal` switches back).
 
@@ -9,7 +9,7 @@ python3 wallpaper.py 1440 2960 sway/wallpaper.png
 python3 wallpaper.py 2960 1440 sway/wallpaper-landscape.png
 ```
 
-Needs numpy and Pillow. Also used with it:
+Needs numpy and Pillow (one sun behind one ridge). Also used with it:
 
 - `bashrc` → `~/.bashrc` (prompt in the theme colors)
 - `../armtix-battery` (battery on mainline too) and `../armtix-brightness`

@@ -10,9 +10,9 @@ pgrep -u "$(id -u)" -x fuzzel >/dev/null && { pkill -u "$(id -u)" -x fuzzel; exi
 
 # fuzzel drops non-ASCII entries (the icons) in the POSIX locale
 export LC_ALL=C.UTF-8
-FONT="JetBrains Mono:size=11:weight=semibold,Symbols Nerd Font:size=12"
+FONT="JetBrains Mono:size=11,Symbols Nerd Font:size=11"
 # landscape is only 480 px high: smaller rows
-LH=46
+LH=42
 swaymsg -t get_outputs -r 2>/dev/null | grep -q '"transform": "\(90\|270\)"' && LH=32
 menu() {	# $1: message, then the entries; prints the chosen index
 	mesg=$1; shift

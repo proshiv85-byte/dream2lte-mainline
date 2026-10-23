@@ -1,23 +1,20 @@
-# Theme "dusk" (plum night, peach sun, lavender accents): sway part.
+# Theme "dusk" (minimal: dark grays, one muted peach accent): sway part.
 # Installed by armtix-theme, included from ~/.config/sway/config.
-# palette: crust #0b0913  base #0f0c18  surface #1b1728  overlay #2a2440
-#          line #3b3456  dim #6e6787  muted #9a93b0  text #e4def0
-#          bright #f6f2fb  lavender #b4a4f2  peach #f4a98c  rose #e8758f
-#          gold #ffd59e  teal #7fd1c7  green #a8d8a0  red #f07178
-output $out bg ~/.config/sway/wallpaper.png fill #0f0c18
-font pango:JetBrains Mono SemiBold 8
-default_border pixel 2
-default_floating_border pixel 2
-titlebar_padding 10 5
+# palette: bg #111013  surface #19181c  line #2a282e  dim #5d5a63
+#          muted #8e8a94  text #d9d5dd  bright #f0edf2  accent #d9a48f
+output $out bg ~/.config/sway/wallpaper.png fill #111013
+font pango:JetBrains Mono 8
+default_border pixel 1
+default_floating_border pixel 1
+titlebar_padding 8 3
 titlebar_border_thickness 0
-title_align center
-gaps inner 6
-gaps outer 3
-smart_gaps off
+title_align left
+gaps inner 3
+gaps outer 0
 hide_edge_borders none
 #                       border  bg      text    indicator child_border
-client.focused          #b4a4f2 #2a2440 #f6f2fb #f4a98c   #b4a4f2
-client.focused_inactive #2a2440 #1b1728 #9a93b0 #2a2440   #2a2440
-client.unfocused        #1b1728 #15121f #6e6787 #1b1728   #1b1728
-client.urgent           #e8758f #3a1f2c #f6f2fb #e8758f   #e8758f
-client.background       #0f0c18
+client.focused          #d9a48f #19181c #f0edf2 #d9a48f   #d9a48f
+client.focused_inactive #2a282e #141316 #8e8a94 #2a282e   #2a282e
+client.unfocused        #1c1b1f #111013 #5d5a63 #1c1b1f   #1c1b1f
+client.urgent           #d07a7a #2a1a1a #f0edf2 #d07a7a   #d07a7a
+client.background       #111013

@@ -1,24 +1,19 @@
-# Notifications, dusk theme
+# Notifications, dusk (minimal)
 font=JetBrains Mono 9
-background-color=#0f0c18eb
-text-color=#e4def0
-border-color=#b4a4f2
-border-size=2
-border-radius=14
-padding=12
-margin=10
-outer-margin=40,0,0,0
-width=320
-max-icon-size=36
-icon-location=left
-progress-color=over #3b3456
+background-color=#111013f5
+text-color=#d9d5dd
+border-color=#2a282e
+border-size=1
+border-radius=2
+padding=10
+margin=6
+width=300
+max-icon-size=28
+progress-color=over #2a282e
 default-timeout=4000
-anchor=top-center
+anchor=top-right
 format=<b>%s</b>\n%b
 
-[urgency=low]
-border-color=#3b3456
-
 [urgency=high]
-border-color=#e8758f
+border-color=#d07a7a
 default-timeout=0
