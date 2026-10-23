@@ -1,0 +1,35 @@
+#!/bin/sh
+# Power-key menu (bound to XF86PowerOff in sway): a fuzzel list that fits the
+# portrait screen, colors from the theme's fuzzel.ini. With the screen off,
+# the power key just turns it back on.
+if swaymsg -t get_outputs -r 2>/dev/null | grep -q '"power": false'; then
+	swaymsg -q 'output * power on'
+	exit 0
+fi
+pgrep -u "$(id -u)" -x fuzzel >/dev/null && { pkill -u "$(id -u)" -x fuzzel; exit 0; }
+
+# fuzzel drops non-ASCII entries (the icons) in the POSIX locale
+export LC_ALL=C.UTF-8
+FONT="JetBrains Mono:size=11:weight=semibold,Symbols Nerd Font:size=12"
+# landscape is only 480 px high: smaller rows
+LH=46
+swaymsg -t get_outputs -r 2>/dev/null | grep -q '"transform": "\(90\|270\)"' && LH=32
+menu() {	# $1: message, then the entries; prints the chosen index
+	mesg=$1; shift
+	printf '%s\n' "$@" | fuzzel --dmenu --index --hide-prompt --no-icons \
+		--no-sort --minimal-lines --lines 8 --width 20 --line-height "$LH" \
+		--font "$FONT" --mesg "$mesg" 2>/dev/null
+}
+confirm() {	# $1: entry text
+	[ "$(menu "Sure?" "$1" "󰜺  Cancel")" = 0 ]
+}
+
+case $(menu "Power" "󰐥  Power off" "󰜉  Reboot" "󰑓  Recovery" \
+	"󰶐  Screen off" "󰍃  Restart desktop" "󰜺  Cancel") in
+	0) confirm "󰐥  Power off" && sudo -n /usr/local/sbin/armtix-power poweroff ;;
+	1) confirm "󰜉  Reboot" && sudo -n /usr/local/sbin/armtix-power reboot ;;
+	2) confirm "󰑓  Recovery" && sudo -n /usr/local/sbin/armtix-power recovery ;;
+	3) sleep 0.3; swaymsg -q 'output * power off' ;;
+	4) confirm "󰍃  Restart desktop" && swaymsg exit ;;
+esac
+exit 0

@@ -17,4 +17,6 @@ Needs numpy and Pillow. Also used with it:
   `exec armtix-brightness restore` to the sway config) → `/usr/local/bin`
 - `../90-backlight.rules` → `/etc/udev/rules.d` (brightness writable by the
   `video` group)
+- `../armtix-power-menu` → `/usr/local/bin`: power menu that fits the portrait
+  screen (fuzzel), with screen off; the power key turns the screen back on
 - btop: `color_theme = "dusk"` in `~/.config/btop/btop.conf`
