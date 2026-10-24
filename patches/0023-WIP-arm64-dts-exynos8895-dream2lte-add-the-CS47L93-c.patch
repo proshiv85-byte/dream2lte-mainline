@@ -1,7 +1,7 @@
 From a57e77dcb2bf6de6bf6d87cb05062b4919762185 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:35:08 +0300
-Subject: [PATCH 23/34] WIP: arm64: dts: exynos8895-dream2lte: add the CS47L93
+Subject: [PATCH 23/38] WIP: arm64: dts: exynos8895-dream2lte: add the CS47L93
  codec and sound card
 
 The Cirrus CS47L93 codec is on SPI3 (USI1), powered by LDO32 (1.8 V)

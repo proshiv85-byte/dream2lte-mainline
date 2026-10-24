@@ -1,0 +1,365 @@
+From b641763a4f5fdb0d53e69bc17fe29b339a8646b4 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sat, 24 Oct 2026 11:20:29 +0300
+Subject: [PATCH 35/38] WIP: ASoC: codecs: add a Maxim MAX98506 speaker
+ amplifier driver
+
+The MAX98506 is a mono class-D amplifier with a boost converter on I2S,
+the loudspeaker amplifier of the Galaxy S8+. Register values follow
+the vendor driver without its Maxim DSM speaker protection: slave,
+clocked from BCLK (32 per frame), moderate gain and the limiter on.
+The amplifier is enabled through DAPM.
+
+Not working yet: with the registers equal to the vendor kernel's while
+it plays (all of 0x00-0x3f), the speaker stays silent on mainline.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ sound/soc/codecs/Kconfig    |   6 +
+ sound/soc/codecs/Makefile   |   2 +
+ sound/soc/codecs/max98506.c | 292 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 300 insertions(+)
+ create mode 100644 sound/soc/codecs/max98506.c
+
+diff --git a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
+index 8e251e1d8..cd57b2df3 100644
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
+@@ -148,6 +148,7 @@ config SND_SOC_ALL_CODECS
+ 	imply SND_SOC_MAX98357A
+ 	imply SND_SOC_MAX98371
+ 	imply SND_SOC_MAX98504
++	imply SND_SOC_MAX98506
+ 	imply SND_SOC_MAX98520
+ 	imply SND_SOC_MAX9867
+ 	imply SND_SOC_MAX98925
+@@ -1444,6 +1445,11 @@ config SND_SOC_MAX98504
+ 	tristate "Maxim MAX98504 speaker amplifier"
+ 	depends on I2C
+ 
++config SND_SOC_MAX98506
++	tristate "Maxim MAX98506 speaker amplifier"
++	depends on I2C
++	select REGMAP_I2C
++
+ config SND_SOC_MAX9867
+ 	tristate "Maxim MAX9867 CODEC"
+ 	depends on I2C
+diff --git a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
+index 3d122ace7..640486e69 100644
+--- a/sound/soc/codecs/Makefile
++++ b/sound/soc/codecs/Makefile
+@@ -433,6 +433,7 @@ snd-soc-zl38060-y := zl38060.o
+ # Amp
+ snd-soc-max9877-y := max9877.o
+ snd-soc-max98504-y := max98504.o
++snd-soc-max98506-y := max98506.o
+ snd-soc-simple-amplifier-y := simple-amplifier.o
+ snd-soc-tpa6130a2-y := tpa6130a2.o
+ snd-soc-tas2552-y := tas2552.o
+@@ -887,6 +888,7 @@ obj-$(CONFIG_SND_SOC_ZL38060)	+= snd-soc-zl38060.o
+ # Amp
+ obj-$(CONFIG_SND_SOC_MAX9877)	+= snd-soc-max9877.o
+ obj-$(CONFIG_SND_SOC_MAX98504)	+= snd-soc-max98504.o
++obj-$(CONFIG_SND_SOC_MAX98506)	+= snd-soc-max98506.o
+ obj-$(CONFIG_SND_SOC_SIMPLE_AMPLIFIER)	+= snd-soc-simple-amplifier.o
+ obj-$(CONFIG_SND_SOC_TPA6130A2)	+= snd-soc-tpa6130a2.o
+ obj-$(CONFIG_SND_SOC_LPASS_MACRO_COMMON)	+= snd-soc-lpass-macro-common.o
+diff --git a/sound/soc/codecs/max98506.c b/sound/soc/codecs/max98506.c
+new file mode 100644
+index 000000000..ee008e012
+--- /dev/null
++++ b/sound/soc/codecs/max98506.c
+@@ -0,0 +1,292 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Maxim MAX98506 mono class-D speaker amplifier with boost converter
++ *
++ * The amplifier is an I2S slave clocked from BCLK. Register values follow
++ * the vendor driver of the Galaxy S8 without the Maxim DSM speaker
++ * protection, which runs in the SoC there: the gain is kept moderate and
++ * the limiter (ALC) is on.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/regmap.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++#include <sound/tlv.h>
++
++#define MAX98506_DAI_CLK_MODE1		0x1a
++#define DAI_CLK_SOURCE_BCLK		BIT(6)
++#define MDLL_MULT			GENMASK(3, 0)
++#define MDLL_MULT_X8			6
++#define MAX98506_DAI_CLK_MODE2		0x1b
++#define DAI_SR				GENMASK(7, 4)
++#define DAI_MAS				BIT(3)
++#define DAI_BSEL			GENMASK(2, 0)
++#define DAI_BSEL_32			0
++#define MAX98506_DAI_CLK_DIV_N_LSBS	0x1f
++#define MAX98506_FORMAT			0x20
++#define DAI_CHANSZ			GENMASK(7, 6)
++#define DAI_CHANSZ_16			1
++#define DAI_CHANSZ_24			2
++#define DAI_CHANSZ_32			3
++#define DAI_DLY				BIT(1)
++#define MAX98506_TDM_SLOT_SELECT	0x21
++#define MAX98506_DOUT_CFG_VMON		0x22
++#define MAX98506_DOUT_CFG_IMON		0x23
++#define DOUT_EN				BIT(5)
++#define DOUT_SLOT			GENMASK(4, 0)
++#define MAX98506_DOUT_HIZ_CFG1		0x27
++#define MAX98506_DOUT_HIZ_CFG2		0x28
++#define MAX98506_DOUT_HIZ_CFG3		0x29
++#define MAX98506_DOUT_HIZ_CFG4		0x2a
++#define MAX98506_FILTERS		0x2c
++#define MAX98506_GAIN			0x2d
++#define DAC_IN_SEL			GENMASK(6, 5)
++#define DAC_IN_SEL_SUMMED		3	/* (left + right) / 2 */
++#define SPK_GAIN			GENMASK(4, 0)
++#define MAX98506_SPK_AMP		0x2f
++#define MAX98506_THRESHOLD		0x30
++#define ALC_EN				BIT(5)
++#define ALC_TH				GENMASK(4, 0)
++#define MAX98506_ALC_CONFIGURATION	0x34
++#define MAX98506_BOOST_CONVERTER	0x35
++#define BST_SYNC			BIT(7)
++#define MAX98506_BLOCK_ENABLE		0x36
++#define BST_EN				BIT(7)
++#define SPK_EN				BIT(4)
++#define ADC_VIMON_EN			GENMASK(1, 0)
++#define MAX98506_CONFIGURATION		0x37
++#define MAX98506_GLOBAL_ENABLE		0x38
++#define GLOBAL_EN			BIT(7)
++#define MAX98506_BOOST_LIMITER		0x3a
++#define MAX98506_VERSION		0xff
++
++/* gain and limiter used by ARMtix on the vendor kernel without DSM */
++#define MAX98506_DEFAULT_GAIN		10	/* +3 dB */
++#define MAX98506_DEFAULT_ALC_TH		10
++
++struct max98506 {
++	struct regmap *regmap;
++};
++
++static const DECLARE_TLV_DB_RANGE(max98506_gain_tlv,
++	1, 31, TLV_DB_SCALE_ITEM(-600, 100, 0),
++);
++
++static const struct snd_kcontrol_new max98506_controls[] = {
++	SOC_SINGLE_TLV("Speaker Volume", MAX98506_GAIN, 0, 31, 0,
++		       max98506_gain_tlv),
++	SOC_SINGLE("ALC Switch", MAX98506_THRESHOLD, 5, 1, 0),
++	SOC_SINGLE("ALC Threshold", MAX98506_THRESHOLD, 0, 31, 0),
++};
++
++static int max98506_amp_event(struct snd_soc_dapm_widget *w,
++			      struct snd_kcontrol *kcontrol, int event)
++{
++	struct snd_soc_component *component =
++		snd_soc_dapm_to_component(w->dapm);
++
++	switch (event) {
++	case SND_SOC_DAPM_POST_PMU:
++		snd_soc_component_update_bits(component, MAX98506_BLOCK_ENABLE,
++					      BST_EN | SPK_EN, BST_EN | SPK_EN);
++		snd_soc_component_write(component, MAX98506_GLOBAL_ENABLE,
++					GLOBAL_EN);
++		break;
++	case SND_SOC_DAPM_PRE_PMD:
++		snd_soc_component_write(component, MAX98506_GLOBAL_ENABLE, 0);
++		/* as the vendor driver: let the output ramp down */
++		usleep_range(15000, 16000);
++		break;
++	}
++	return 0;
++}
++
++static const struct snd_soc_dapm_widget max98506_widgets[] = {
++	SND_SOC_DAPM_DAC_E("Amp", "HiFi Playback", SND_SOC_NOPM, 0, 0,
++			   max98506_amp_event,
++			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
++	SND_SOC_DAPM_OUTPUT("SPK"),
++};
++
++static const struct snd_soc_dapm_route max98506_routes[] = {
++	{ "SPK", NULL, "Amp" },
++};
++
++static int max98506_dai_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
++{
++	struct snd_soc_component *component = dai->component;
++
++	if ((fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) != SND_SOC_DAIFMT_CBC_CFC ||
++	    (fmt & SND_SOC_DAIFMT_FORMAT_MASK) != SND_SOC_DAIFMT_I2S ||
++	    (fmt & SND_SOC_DAIFMT_INV_MASK) != SND_SOC_DAIFMT_NB_NF)
++		return -EINVAL;
++
++	/* slave, clocked from BCLK, 32 BCLKs per frame */
++	snd_soc_component_update_bits(component, MAX98506_DAI_CLK_MODE1,
++				      DAI_CLK_SOURCE_BCLK, DAI_CLK_SOURCE_BCLK);
++	snd_soc_component_update_bits(component, MAX98506_DAI_CLK_MODE2,
++				      DAI_MAS | DAI_BSEL,
++				      FIELD_PREP(DAI_BSEL, DAI_BSEL_32));
++	return 0;
++}
++
++static const unsigned int max98506_rates[] = {
++	8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
++};
++
++static int max98506_dai_hw_params(struct snd_pcm_substream *substream,
++				  struct snd_pcm_hw_params *params,
++				  struct snd_soc_dai *dai)
++{
++	struct snd_soc_component *component = dai->component;
++	unsigned int rate = params_rate(params);
++	unsigned int chansz, sr;
++
++	switch (params_width(params)) {
++	case 16:
++		chansz = DAI_CHANSZ_16;
++		break;
++	case 24:
++		chansz = DAI_CHANSZ_24;
++		break;
++	case 32:
++		chansz = DAI_CHANSZ_32;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	for (sr = 0; sr < ARRAY_SIZE(max98506_rates); sr++)
++		if (max98506_rates[sr] == rate)
++			break;
++	if (sr == ARRAY_SIZE(max98506_rates))
++		return -EINVAL;
++
++	snd_soc_component_update_bits(component, MAX98506_FORMAT, DAI_CHANSZ,
++				      FIELD_PREP(DAI_CHANSZ, chansz));
++	snd_soc_component_update_bits(component, MAX98506_DAI_CLK_MODE2, DAI_SR,
++				      FIELD_PREP(DAI_SR, sr));
++	/* the vendor driver's MDLL setting for a 12.288 MHz system clock */
++	snd_soc_component_update_bits(component, MAX98506_DAI_CLK_MODE1,
++				      MDLL_MULT, FIELD_PREP(MDLL_MULT, MDLL_MULT_X8));
++	snd_soc_component_update_bits(component, MAX98506_BOOST_CONVERTER,
++				      BST_SYNC, rate % 11025 ? 0 : BST_SYNC);
++	return 0;
++}
++
++static const struct snd_soc_dai_ops max98506_dai_ops = {
++	.set_fmt	= max98506_dai_set_fmt,
++	.hw_params	= max98506_dai_hw_params,
++};
++
++static struct snd_soc_dai_driver max98506_dai = {
++	.name = "max98506-aif1",
++	.playback = {
++		.stream_name	= "HiFi Playback",
++		.channels_min	= 1,
++		.channels_max	= 2,
++		.rates		= SNDRV_PCM_RATE_8000_48000,
++		.formats	= SNDRV_PCM_FMTBIT_S16_LE |
++				  SNDRV_PCM_FMTBIT_S24_LE |
++				  SNDRV_PCM_FMTBIT_S32_LE,
++	},
++	.ops = &max98506_dai_ops,
++};
++
++/* initial setup of the vendor driver for a single amplifier */
++static const struct reg_sequence max98506_init[] = {
++	{ MAX98506_GLOBAL_ENABLE, 0 },
++	{ MAX98506_FORMAT, DAI_DLY },
++	{ MAX98506_TDM_SLOT_SELECT, 0xc8 },
++	{ MAX98506_DOUT_HIZ_CFG1, 0xff },
++	{ MAX98506_DOUT_HIZ_CFG2, 0xff },
++	{ MAX98506_DOUT_HIZ_CFG3, 0xff },
++	{ MAX98506_DOUT_HIZ_CFG4, 0xf0 },
++	{ MAX98506_FILTERS, 0xd9 },
++	{ MAX98506_GAIN, FIELD_PREP_CONST(DAC_IN_SEL, DAC_IN_SEL_SUMMED) |
++			 FIELD_PREP_CONST(SPK_GAIN, MAX98506_DEFAULT_GAIN) },
++	{ MAX98506_SPK_AMP, 0x00 },
++	{ MAX98506_THRESHOLD, ALC_EN |
++			      FIELD_PREP_CONST(ALC_TH, MAX98506_DEFAULT_ALC_TH) },
++	{ MAX98506_ALC_CONFIGURATION, 0x12 },
++	/* boost at its maximum, 8.5 V */
++	{ MAX98506_CONFIGURATION, 0x00 },
++	/* no ALC muting */
++	{ MAX98506_BOOST_LIMITER, 0xf8 },
++	/* the board's register overrides (vendor device tree) */
++	{ MAX98506_DAI_CLK_DIV_N_LSBS, 0x00 },
++	{ MAX98506_TDM_SLOT_SELECT, 0xc0 },
++};
++
++static int max98506_component_probe(struct snd_soc_component *component)
++{
++	struct max98506 *max98506 = snd_soc_component_get_drvdata(component);
++
++	return regmap_multi_reg_write(max98506->regmap, max98506_init,
++				      ARRAY_SIZE(max98506_init));
++}
++
++static const struct snd_soc_component_driver max98506_component = {
++	.probe			= max98506_component_probe,
++	.controls		= max98506_controls,
++	.num_controls		= ARRAY_SIZE(max98506_controls),
++	.dapm_widgets		= max98506_widgets,
++	.num_dapm_widgets	= ARRAY_SIZE(max98506_widgets),
++	.dapm_routes		= max98506_routes,
++	.num_dapm_routes	= ARRAY_SIZE(max98506_routes),
++	.endianness		= 1,
++};
++
++static const struct regmap_config max98506_regmap = {
++	.reg_bits	= 8,
++	.val_bits	= 8,
++	.max_register	= MAX98506_VERSION,
++	.cache_type	= REGCACHE_NONE,
++};
++
++static int max98506_i2c_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct max98506 *max98506;
++	unsigned int version;
++	int ret;
++
++	max98506 = devm_kzalloc(dev, sizeof(*max98506), GFP_KERNEL);
++	if (!max98506)
++		return -ENOMEM;
++
++	max98506->regmap = devm_regmap_init_i2c(client, &max98506_regmap);
++	if (IS_ERR(max98506->regmap))
++		return PTR_ERR(max98506->regmap);
++
++	ret = regmap_read(max98506->regmap, MAX98506_VERSION, &version);
++	if (ret)
++		return dev_err_probe(dev, ret, "no answer from the amplifier\n");
++	dev_info(dev, "revision %#x\n", version);
++
++	i2c_set_clientdata(client, max98506);
++	return devm_snd_soc_register_component(dev, &max98506_component,
++					       &max98506_dai, 1);
++}
++
++static const struct of_device_id max98506_of_match[] = {
++	{ .compatible = "maxim,max98506" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, max98506_of_match);
++
++static struct i2c_driver max98506_driver = {
++	.driver = {
++		.name = "max98506",
++		.of_match_table = max98506_of_match,
++	},
++	.probe = max98506_i2c_probe,
++};
++module_i2c_driver(max98506_driver);
++
++MODULE_DESCRIPTION("Maxim MAX98506 speaker amplifier driver");
++MODULE_LICENSE("GPL");

@@ -1,7 +1,7 @@
 From afbb1ba9d3ee8aa9d19129d71f09dec2829e7549 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:52:46 +0300
-Subject: [PATCH 28/34] WIP: Bluetooth: hci_bcm, btbcm: add BCM4361
+Subject: [PATCH 28/38] WIP: Bluetooth: hci_bcm, btbcm: add BCM4361
 
 The BCM4361 (Galaxy S8+) reports LMP subversion 0x411a and the local
 name "BCM4347B0" before its patch is loaded, and the default address

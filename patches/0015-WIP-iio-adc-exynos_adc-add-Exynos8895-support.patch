@@ -1,7 +1,7 @@
 From e08bae74156ba60dc6a9ecd909d36cf1287e9364 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 16:32:17 +0300
-Subject: [PATCH 15/34] WIP: iio: adc: exynos_adc: add Exynos8895 support
+Subject: [PATCH 15/38] WIP: iio: adc: exynos_adc: add Exynos8895 support
 
 The Exynos8895 ADC works like the Exynos7 one but returns the
 conversion result at 0x08 and is reset in two steps (soft reset, then

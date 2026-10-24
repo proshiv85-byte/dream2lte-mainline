@@ -31,7 +31,7 @@ already works.
 | # | Item | Why it matters | Effort | Notes |
 |---|---|---|---|---|
 | 12 | ~~USB host / OTG~~, USB 3 | **Host mode done** (S2MM005 Type-C driver, VBUS from the charger). | M–L | Follow-ups: test with a compliant device (OTG adapter); USB 3 needs the SuperSpeed PHY. |
-| 13 | **Audio** | Speaker, earpiece, mics. | L | **Headphone playback works** (ABOX + Calliope firmware, CS47L93 with FLL1 from MCLK1 = XCLKOUT 26 MHz). Next: the loudspeaker (MAX98506 on UAIF4, I2C 3-0031), earpiece (HPOUT3), mics and capture (WDMA), jack detection (needs the 32 kHz MCLK2), the ABOX ASRC for 44.1 kHz. |
+| 13 | **Audio** | Speaker, earpiece, mics. | L | **Headphone playback works** (ABOX + Calliope firmware, CS47L93 with FLL1 from MCLK1 = XCLKOUT 26 MHz). Loudspeaker: driver and routing written (`Output` control), but silent on mainline though it works on 4.4: see [notes/loudspeaker.md](notes/loudspeaker.md). Next: earpiece (HPOUT3), mics and capture (WDMA), jack detection (needs the 32 kHz MCLK2), the ABOX ASRC for 44.1 kHz. |
 | 14 | **Sensors** (accelerometer, gyro, light, proximity) | Auto-rotate, auto-brightness. | L–XL | They sit behind a sensor hub MCU with Samsung's own protocol. |
 | 15 | **NFC** | Low value on Linux. | M | Samsung S3NRN82; mainline `s3fwrn5` might cover it. |
 | 16 | **Modem, cameras, fingerprint, iris** | — | XL | Proprietary firmware/protocols or secure-world only. Probably not worth it. |

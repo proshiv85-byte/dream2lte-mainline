@@ -1,7 +1,7 @@
 From 0cc8e3a93aefb2178d2bac3e3c7919391dcae155 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:35:08 +0300
-Subject: [PATCH 25/34] WIP: ASoC: samsung: add the Galaxy S8+ (dream2lte)
+Subject: [PATCH 25/38] WIP: ASoC: samsung: add the Galaxy S8+ (dream2lte)
  sound card
 
 One playback link, ABOX UAIF0 (clock master) to CS47L93 AIF1,

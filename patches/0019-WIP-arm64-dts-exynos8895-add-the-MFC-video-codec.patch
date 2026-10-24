@@ -1,7 +1,7 @@
 From 0e522ace5b3528bbc7d482db089670323708c5a8 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 18:15:53 +0300
-Subject: [PATCH 19/34] WIP: arm64: dts: exynos8895: add the MFC video codec
+Subject: [PATCH 19/38] WIP: arm64: dts: exynos8895: add the MFC video codec
 
 Power domain and clocks are left on by the bootloader (powering the
 domain off would reset its clock muxes), the SysMMUs stay in bypass.

@@ -1,7 +1,7 @@
 From 21fbc8ad89d7f67cd3307741d70ae9999ee5f881 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 16:32:17 +0300
-Subject: [PATCH 14/34] WIP: dt-bindings: iio: adc: samsung,exynos-adc: add
+Subject: [PATCH 14/38] WIP: dt-bindings: iio: adc: samsung,exynos-adc: add
  exynos8895-adc
 
 Assisted-by: Claude Opus 5.5 (Anthropic)

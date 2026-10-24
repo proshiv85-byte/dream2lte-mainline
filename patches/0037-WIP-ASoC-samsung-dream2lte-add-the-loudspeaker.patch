@@ -1,0 +1,181 @@
+From 66bce109dafff6ae101cb502f36c7d207693981c Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sat, 24 Oct 2026 11:20:29 +0300
+Subject: [PATCH 37/38] WIP: ASoC: samsung: dream2lte: add the loudspeaker
+
+Add the MAX98506 on UAIF4 as a second codec of the playback link and
+an "Output" control (Headphones, Speaker) that switches the ABOX route
+and the DAPM pins; there is no jack detection yet.
+
+Not working yet: the speaker stays silent (see the amplifier driver).
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ sound/soc/samsung/Kconfig     |  3 +-
+ sound/soc/samsung/dream2lte.c | 90 +++++++++++++++++++++++++++++++----
+ 2 files changed, 82 insertions(+), 11 deletions(-)
+
+diff --git a/sound/soc/samsung/Kconfig b/sound/soc/samsung/Kconfig
+index 0a69eb3ac..fbf27a08b 100644
+--- a/sound/soc/samsung/Kconfig
++++ b/sound/soc/samsung/Kconfig
+@@ -159,8 +159,9 @@ config SND_SOC_SAMSUNG_EXYNOS8895_ABOX
+ 
+ config SND_SOC_SAMSUNG_DREAM2LTE
+ 	tristate "Sound card for the Galaxy S8+ (dream2lte)"
+-	depends on SND_SOC_SAMSUNG_EXYNOS8895_ABOX && MFD_CS47L92
++	depends on SND_SOC_SAMSUNG_EXYNOS8895_ABOX && MFD_CS47L92 && I2C
+ 	select SND_SOC_CS47L92
++	select SND_SOC_MAX98506
+ 	help
+ 	  Say Y or M to add the sound card of the Samsung Galaxy S8+:
+ 	  ABOX playback to the CS47L93 codec.
+diff --git a/sound/soc/samsung/dream2lte.c b/sound/soc/samsung/dream2lte.c
+index 3c590c01f..41322f633 100644
+--- a/sound/soc/samsung/dream2lte.c
++++ b/sound/soc/samsung/dream2lte.c
+@@ -1,10 +1,13 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+- * Galaxy S8+ (dream2lte) sound card: ABOX UAIF0 -> CS47L93 AIF1
++ * Galaxy S8+ (dream2lte) sound card: ABOX UAIF0 -> CS47L93 AIF1 for the
++ * headphones, UAIF4 -> MAX98506 for the loudspeaker
+  *
+- * ABOX is the I2S clock master. The codec runs SYSCLK at 98.304 MHz from
+- * FLL1, locked to MCLK1 (26 MHz from the SoC's XCLKOUT), as the vendor
+- * kernel does.
++ * ABOX is the I2S clock master of both. The codec runs SYSCLK at
++ * 98.304 MHz from FLL1, locked to MCLK1 (26 MHz from the SoC's XCLKOUT), as
++ * the vendor kernel does. One stream plays on either output, chosen with
++ * the "Output" control: without jack detection there is no automatic
++ * switch yet.
+  */
+ 
+ #include <linux/mfd/madera/core.h>
+@@ -14,6 +17,7 @@
+ #include <sound/soc.h>
+ 
+ #include "../codecs/madera.h"
++#include "exynos8895-abox.h"
+ 
+ #define SYSCLK_RATE	98304000
+ #define MCLK1_RATE	26000000
+@@ -39,9 +43,10 @@ static int dream2lte_init(struct snd_soc_pcm_runtime *rtd)
+ 				      MADERA_CLK_SYSCLK_1, 0, 0);
+ }
+ 
+-SND_SOC_DAILINK_DEFS(uaif0,
++SND_SOC_DAILINK_DEFS(uaif,
+ 	DAILINK_COMP_ARRAY(COMP_EMPTY()),
+-	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "cs47l92-aif1")),
++	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "cs47l92-aif1"),
++			   COMP_CODEC(NULL, "max98506-aif1")),
+ 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+ 
+ static struct snd_soc_dai_link dream2lte_dai[] = {
+@@ -52,19 +57,78 @@ static struct snd_soc_dai_link dream2lte_dai[] = {
+ 				  SND_SOC_DAIFMT_CBC_CFC,
+ 		.init		= dream2lte_init,
+ 		.playback_only	= 1,
+-		SND_SOC_DAILINK_REG(uaif0),
++		SND_SOC_DAILINK_REG(uaif),
+ 	},
+ };
+ 
+ static const struct snd_soc_dapm_widget dream2lte_widgets[] = {
+ 	SND_SOC_DAPM_HP("Headphone", NULL),
++	SND_SOC_DAPM_SPK("Speaker", NULL),
+ };
+ 
+ static const struct snd_soc_dapm_route dream2lte_routes[] = {
+ 	{ "Headphone", NULL, "HPOUT2L" },
+ 	{ "Headphone", NULL, "HPOUT2R" },
++	{ "Speaker", NULL, "SPK" },
+ };
+ 
++static const char * const dream2lte_outputs[] = { "Headphones", "Speaker" };
++static SOC_ENUM_SINGLE_EXT_DECL(dream2lte_output_enum, dream2lte_outputs);
++static enum abox_output dream2lte_output = ABOX_OUTPUT_UAIF4;
++
++static void dream2lte_set_output(struct snd_soc_card *card,
++				 enum abox_output output)
++{
++	struct snd_soc_pcm_runtime *rtd =
++		snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
++	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
++	bool spk = output == ABOX_OUTPUT_UAIF4;
++
++	dream2lte_output = output;
++	exynos8895_abox_set_output(snd_soc_rtd_to_cpu(rtd, 0), output);
++	if (spk) {
++		snd_soc_dapm_disable_pin(dapm, "Headphone");
++		snd_soc_dapm_enable_pin(dapm, "Speaker");
++	} else {
++		snd_soc_dapm_disable_pin(dapm, "Speaker");
++		snd_soc_dapm_enable_pin(dapm, "Headphone");
++	}
++	snd_soc_dapm_sync(dapm);
++}
++
++static int dream2lte_output_get(struct snd_kcontrol *kcontrol,
++				struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.enumerated.item[0] = dream2lte_output;
++	return 0;
++}
++
++static int dream2lte_output_put(struct snd_kcontrol *kcontrol,
++				struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
++	unsigned int item = ucontrol->value.enumerated.item[0];
++
++	if (item >= ARRAY_SIZE(dream2lte_outputs))
++		return -EINVAL;
++	if (item == dream2lte_output)
++		return 0;
++
++	dream2lte_set_output(card, item);
++	return 1;
++}
++
++static const struct snd_kcontrol_new dream2lte_controls[] = {
++	SOC_ENUM_EXT("Output", dream2lte_output_enum,
++		     dream2lte_output_get, dream2lte_output_put),
++};
++
++static int dream2lte_late_probe(struct snd_soc_card *card)
++{
++	dream2lte_set_output(card, dream2lte_output);
++	return 0;
++}
++
+ static struct snd_soc_card dream2lte_card = {
+ 	.name			= "dream2lte",
+ 	.owner			= THIS_MODULE,
+@@ -74,6 +138,9 @@ static struct snd_soc_card dream2lte_card = {
+ 	.num_dapm_widgets	= ARRAY_SIZE(dream2lte_widgets),
+ 	.dapm_routes		= dream2lte_routes,
+ 	.num_dapm_routes	= ARRAY_SIZE(dream2lte_routes),
++	.controls		= dream2lte_controls,
++	.num_controls		= ARRAY_SIZE(dream2lte_controls),
++	.late_probe		= dream2lte_late_probe,
+ 	.fully_routed		= true,
+ };
+ 
+@@ -84,9 +151,12 @@ static int dream2lte_probe(struct platform_device *pdev)
+ 	struct snd_soc_card *card = &dream2lte_card;
+ 
+ 	link->cpus->of_node = of_parse_phandle(dev->of_node, "samsung,cpu", 0);
+-	link->codecs->of_node = of_parse_phandle(dev->of_node, "samsung,codec", 0);
+-	if (!link->cpus->of_node || !link->codecs->of_node)
+-		return dev_err_probe(dev, -EINVAL, "missing cpu or codec\n");
++	link->codecs[0].of_node = of_parse_phandle(dev->of_node, "samsung,codec", 0);
++	link->codecs[1].of_node = of_parse_phandle(dev->of_node,
++						   "samsung,speaker-amp", 0);
++	if (!link->cpus->of_node || !link->codecs[0].of_node ||
++	    !link->codecs[1].of_node)
++		return dev_err_probe(dev, -EINVAL, "missing cpu or codecs\n");
+ 	link->platforms->of_node = link->cpus->of_node;
+ 
+ 	card->dev = dev;

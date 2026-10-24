@@ -1,0 +1,245 @@
+From dd99252d0036f6ad6eaebe530d953484d31a468c Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sat, 24 Oct 2026 11:20:29 +0300
+Subject: [PATCH 36/38] WIP: ASoC: samsung: exynos8895-abox: play on UAIF0 or
+ UAIF4
+
+UAIF4 feeds the loudspeaker amplifier. Clock and format it like UAIF0
+and let the machine driver choose which one reads the mixer output
+(SIFS0): two readers drain it in turns and the stream plays twice as
+fast.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ sound/soc/samsung/exynos8895-abox.c | 83 ++++++++++++++++++++++++-----
+ sound/soc/samsung/exynos8895-abox.h | 15 ++++++
+ 2 files changed, 84 insertions(+), 14 deletions(-)
+ create mode 100644 sound/soc/samsung/exynos8895-abox.h
+
+diff --git a/sound/soc/samsung/exynos8895-abox.c b/sound/soc/samsung/exynos8895-abox.c
+index a0cbb2b8c..5c0856215 100644
+--- a/sound/soc/samsung/exynos8895-abox.c
++++ b/sound/soc/samsung/exynos8895-abox.c
+@@ -27,11 +27,14 @@
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ 
++#include "exynos8895-abox.h"
++
+ /* CMU_ABOX, inside the ABOX power domain and reset with it */
+ #define CMU_PLL_CON0		0x0120
+ #define CMU_PLL_CON3		0x012c
+ #define CMU_MUX_CPU		0x1000
+ #define CMU_MUX_UAIF0		0x1004
++#define CMU_MUX_UAIF4		0x1014
+ #define CMU_DIV_AUDIF		0x1800
+ #define CMU_DIV_BUS		0x1804
+ #define CMU_DIV_BUSP		0x1808
+@@ -41,6 +44,7 @@
+ #define CMU_DIV_DSIF		0x181c
+ #define CMU_DIV_PLL		0x1820
+ #define CMU_DIV_UAIF0		0x1828
++#define CMU_DIV_UAIF4		0x1838
+ 
+ #define PLL_ENABLE		BIT(31)
+ #define PLL_STABLE		BIT(29)
+@@ -77,6 +81,8 @@
+ #define ABOX_SYSPOWER_CTRL	0x0010	/* lets ABOX reach DRAM */
+ #define ABOX_ROUTE_CTRL0	0x0040
+ #define ROUTE_UAIF_SPK0		GENMASK(3, 0)
++#define ROUTE_UAIF_SPK4		GENMASK(19, 16)
++#define ROUTE_RESERVED		0
+ #define ROUTE_SIFS0		1
+ #define ABOX_SPUS_CTRL0		0x0200
+ #define SPUS_RDMA0		GENMASK(3, 0)
+@@ -92,16 +98,19 @@
+ #define ABOX_SPUS_CTRL1		0x0204
+ #define SPUS_MIXP_FORMAT	GENMASK(4, 0)
+ 
+-#define ABOX_UAIF0_CTRL0	0x0500
++#define ABOX_UAIF_CTRL0(x)	(0x0500 + 0x10 * (x))
+ #define UAIF_SPK_ENABLE		BIT(0)
+ /* set: UAIF drives BCLK and LRCLK */
+ #define UAIF_MODE_MASTER	BIT(2)
+-#define ABOX_UAIF0_CTRL1	0x0504
++#define ABOX_UAIF_CTRL1(x)	(0x0504 + 0x10 * (x))
+ #define UAIF_FORMAT		GENMASK(28, 24)
+ #define UAIF_BCLK_POLARITY	BIT(23)
+ #define UAIF_SLOT_MAX		GENMASK(20, 18)
+ #define UAIF_SBIT_MAX		GENMASK(17, 12)
+ 
++/* UAIF0: CS47L93 codec, UAIF4: MAX98506 speaker amplifier */
++static const unsigned int abox_uaifs[] = { 0, 4 };
++
+ /* GIC inside ABOX, shared by its Cortex-A7 and the AP */
+ #define GICD_CTLR		0x000
+ #define GICD_IPRIORITYR		0x400
+@@ -227,6 +236,8 @@ struct abox {
+ 	spinlock_t ipc_lock;
+ 
+ 	unsigned int fmt;
++	enum abox_output output;
++	bool booted;
+ 	struct snd_pcm_substream *substream;
+ 	u32 pointer;
+ 	bool buffer_mapped;
+@@ -571,6 +582,19 @@ static int abox_boot(struct abox *abox)
+ 	return 0;
+ }
+ 
++/*
++ * Only one UAIF may read SIFS0: two readers drain it in turns and the
++ * stream plays twice as fast. The other one gets nothing.
++ */
++static void abox_route(struct abox *abox)
++{
++	bool spk = abox->output == ABOX_OUTPUT_UAIF4;
++
++	abox_update(abox, ABOX_ROUTE_CTRL0, ROUTE_UAIF_SPK0 | ROUTE_UAIF_SPK4,
++		    FIELD_PREP(ROUTE_UAIF_SPK0, spk ? ROUTE_RESERVED : ROUTE_SIFS0) |
++		    FIELD_PREP(ROUTE_UAIF_SPK4, spk ? ROUTE_SIFS0 : ROUTE_RESERVED));
++}
++
+ static void abox_configure(struct abox *abox)
+ {
+ 	struct abox_ipc_msg msg = { .ipcid = IPC_SYSTEM };
+@@ -588,15 +612,34 @@ static void abox_configure(struct abox *abox)
+ 	}
+ 
+ 	/*
+-	 * RDMA0 -> mixer (SIFS0) -> UAIF0, without the vendor's ASRC: it
+-	 * isn't set up for the stream rate and drains the RDMA almost four
+-	 * times too fast. The stream runs at the mixer rate, 48 kHz.
++	 * RDMA0 -> mixer (SIFS0) -> UAIF0 or UAIF4, without the vendor's
++	 * ASRC: it isn't set up for the stream rate and drains the RDMA
++	 * almost four times too fast. The stream runs at the mixer rate,
++	 * 48 kHz.
+ 	 */
+ 	abox_update(abox, ABOX_SPUS_CTRL0, SPUS_RDMA0,
+ 		    FIELD_PREP(SPUS_OUT, SPUS_OUT_SIFS0));
+-	abox_update(abox, ABOX_ROUTE_CTRL0, ROUTE_UAIF_SPK0,
+-		    FIELD_PREP(ROUTE_UAIF_SPK0, ROUTE_SIFS0));
++	abox_route(abox);
++}
++
++/**
++ * exynos8895_abox_set_output - choose the UAIF that plays the stream
++ * @dai: the ABOX DAI
++ * @output: %ABOX_OUTPUT_UAIF0 or %ABOX_OUTPUT_UAIF4
++ *
++ * Both UAIFs are clocked and enabled with the stream, only the chosen one
++ * gets the samples.
++ */
++void exynos8895_abox_set_output(struct snd_soc_dai *dai,
++				enum abox_output output)
++{
++	struct abox *abox = snd_soc_dai_get_drvdata(dai);
++
++	abox->output = output;
++	if (abox->booted)
++		abox_route(abox);
+ }
++EXPORT_SYMBOL_GPL(exynos8895_abox_set_output);
+ 
+ static int abox_dai_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+ {
+@@ -625,7 +668,7 @@ static int abox_dai_hw_params(struct snd_pcm_substream *substream,
+ 	bool master = (abox->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) ==
+ 		      SND_SOC_DAIFMT_BP_FP;
+ 	u32 ctrl1;
+-	int ret;
++	int i, ret;
+ 
+ 	if (channels != 2 || AUD_PLL_RATE % audif || audif % bclk ||
+ 	    audif / bclk > 32)
+@@ -635,8 +678,11 @@ static int abox_dai_hw_params(struct snd_pcm_substream *substream,
+ 	if (ret)
+ 		return ret;
+ 
++	/* UAIF0 (codec) and UAIF4 (speaker amplifier), the same format */
+ 	writel(0, abox->cmu + CMU_MUX_UAIF0);
++	writel(0, abox->cmu + CMU_MUX_UAIF4);
+ 	ret = abox_cmu_div(abox, CMU_DIV_UAIF0, audif / bclk - 1);
++	ret = ret ?: abox_cmu_div(abox, CMU_DIV_UAIF4, audif / bclk - 1);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -645,12 +691,14 @@ static int abox_dai_hw_params(struct snd_pcm_substream *substream,
+ 		FIELD_PREP(UAIF_SLOT_MAX, channels - 1) |
+ 		FIELD_PREP(UAIF_SBIT_MAX, width - 1) |
+ 		FIELD_PREP(UAIF_FORMAT, abox_format(width, channels));
+-	writel(ctrl1, abox->sfr + ABOX_UAIF0_CTRL1);
++	for (i = 0; i < ARRAY_SIZE(abox_uaifs); i++) {
++		writel(ctrl1, abox->sfr + ABOX_UAIF_CTRL1(abox_uaifs[i]));
++		abox_update(abox, ABOX_UAIF_CTRL0(abox_uaifs[i]),
++			    UAIF_MODE_MASTER, master ? UAIF_MODE_MASTER : 0);
++	}
+ 	/* the SPUS mixer output feeding SIFS0 has the same format */
+ 	abox_update(abox, ABOX_SPUS_CTRL1, SPUS_MIXP_FORMAT,
+ 		    FIELD_PREP(SPUS_MIXP_FORMAT, abox_format(width, channels)));
+-	abox_update(abox, ABOX_UAIF0_CTRL0, UAIF_MODE_MASTER,
+-		    master ? UAIF_MODE_MASTER : 0);
+ 
+ 	return 0;
+ }
+@@ -659,13 +707,15 @@ static int abox_dai_trigger(struct snd_pcm_substream *substream, int cmd,
+ 			    struct snd_soc_dai *dai)
+ {
+ 	struct abox *abox = snd_soc_dai_get_drvdata(dai);
++	int i;
+ 
+ 	switch (cmd) {
+ 	case SNDRV_PCM_TRIGGER_START:
+ 	case SNDRV_PCM_TRIGGER_RESUME:
+ 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+-		abox_update(abox, ABOX_UAIF0_CTRL0, UAIF_SPK_ENABLE,
+-			    UAIF_SPK_ENABLE);
++		for (i = 0; i < ARRAY_SIZE(abox_uaifs); i++)
++			abox_update(abox, ABOX_UAIF_CTRL0(abox_uaifs[i]),
++				    UAIF_SPK_ENABLE, UAIF_SPK_ENABLE);
+ 		break;
+ 	}
+ 	return 0;
+@@ -676,8 +726,12 @@ static void abox_dai_shutdown(struct snd_pcm_substream *substream,
+ {
+ 	struct abox *abox = snd_soc_dai_get_drvdata(dai);
+ 
++	int i;
++
+ 	/* disabled only here to avoid pops, like the vendor driver */
+-	abox_update(abox, ABOX_UAIF0_CTRL0, UAIF_SPK_ENABLE, 0);
++	for (i = 0; i < ARRAY_SIZE(abox_uaifs); i++)
++		abox_update(abox, ABOX_UAIF_CTRL0(abox_uaifs[i]),
++			    UAIF_SPK_ENABLE, 0);
+ }
+ 
+ static const struct snd_soc_dai_ops abox_dai_ops = {
+@@ -995,6 +1049,7 @@ static int abox_probe(struct platform_device *pdev)
+ 		return 0;
+ 	}
+ 	abox_configure(abox);
++	abox->booted = true;
+ 
+ 	return devm_snd_soc_register_component(dev, &abox_component,
+ 					       &abox_dai, 1);
+diff --git a/sound/soc/samsung/exynos8895-abox.h b/sound/soc/samsung/exynos8895-abox.h
+new file mode 100644
+index 000000000..4a2ea9461
+--- /dev/null
++++ b/sound/soc/samsung/exynos8895-abox.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __SND_SOC_SAMSUNG_EXYNOS8895_ABOX_H
++#define __SND_SOC_SAMSUNG_EXYNOS8895_ABOX_H
++
++struct snd_soc_dai;
++
++enum abox_output {
++	ABOX_OUTPUT_UAIF0,
++	ABOX_OUTPUT_UAIF4,
++};
++
++void exynos8895_abox_set_output(struct snd_soc_dai *dai,
++				enum abox_output output);
++
++#endif

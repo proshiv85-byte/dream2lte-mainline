@@ -18,6 +18,7 @@ start() {
 			sleep 0.5
 		done
 		c="amixer -c dream2lte -q cset"
+		$c name="Output" Headphones &&
 		$c name="HPOUT2 Digital Switch" on &&
 		$c name="HPOUT2L Input 1" AIF1RX1 &&
 		$c name="HPOUT2R Input 1" AIF1RX2
