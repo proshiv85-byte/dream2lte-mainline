@@ -1,129 +1,62 @@
-From cec260feb4eeb39bb3b5416d1fe8888ea2efb19f Mon Sep 17 00:00:00 2001
+From 0cc8e3a93aefb2178d2bac3e3c7919391dcae155 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:35:08 +0300
-Subject: [PATCH 25/33] WIP: ASoC: samsung: add the Galaxy S8+ (dream2lte)
+Subject: [PATCH 25/34] WIP: ASoC: samsung: add the Galaxy S8+ (dream2lte)
  sound card
 
-One playback link, ABOX UAIF0 to CS47L93 AIF1, headphones on HPOUT2.
-The codec runs SYSCLK at 98.304 MHz from FLL1.
-
-Not working yet: FLL1 never locks, from the AIF1 bit clock nor from
-MCLK2; the module parameters are bring-up switches to try sources.
+One playback link, ABOX UAIF0 (clock master) to CS47L93 AIF1,
+headphones on HPOUT2. The codec runs SYSCLK at 98.304 MHz from FLL1,
+locked to MCLK1 (26 MHz from the SoC's XCLKOUT) as the vendor kernel
+does; MCLK2 is a 32 kHz input.
 
 Assisted-by: Claude Opus 5.5 (Anthropic)
 ---
- sound/soc/samsung/dream2lte.c | 182 ++++++++++++++++++++++++++++++++++
- 1 file changed, 182 insertions(+)
+ sound/soc/samsung/dream2lte.c | 112 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 112 insertions(+)
  create mode 100644 sound/soc/samsung/dream2lte.c
 
 diff --git a/sound/soc/samsung/dream2lte.c b/sound/soc/samsung/dream2lte.c
 new file mode 100644
-index 000000000..3389fe072
+index 000000000..3c590c01f
 --- /dev/null
 +++ b/sound/soc/samsung/dream2lte.c
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,112 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Galaxy S8+ (dream2lte) sound card: ABOX UAIF0 -> CS47L93 AIF1
 + *
-+ * ABOX is the I2S clock master; the codec runs its SYSCLK from FLL1 locked
-+ * to the AIF1 bit clock, so no separate MCLK is needed.
-+ *
-+ * Not working yet: FLL1 never locks, whatever its reference (the module
-+ * parameters below are bring-up switches to try them).
++ * ABOX is the I2S clock master. The codec runs SYSCLK at 98.304 MHz from
++ * FLL1, locked to MCLK1 (26 MHz from the SoC's XCLKOUT), as the vendor
++ * kernel does.
 + */
 +
 +#include <linux/mfd/madera/core.h>
 +#include <linux/module.h>
 +#include <linux/of.h>
 +#include <linux/platform_device.h>
-+#include <sound/pcm_params.h>
 +#include <sound/soc.h>
 +
 +#include "../codecs/madera.h"
 +
 +#define SYSCLK_RATE	98304000
-+#define MCLK2_RATE	26000000	/* PMU CLKOUT0, TCXO */
-+
-+/* bring-up switches */
-+static bool mclk2;
-+module_param(mclk2, bool, 0444);
-+MODULE_PARM_DESC(mclk2, "run FLL1 from MCLK2 instead of the AIF1 bit clock");
-+static int fll_test = -1;
-+module_param(fll_test, int, 0444);
-+MODULE_PARM_DESC(fll_test, "at init, try to lock FLL1 to this source at 1.536 MHz");
-+static int fll_rate = 1536000;
-+module_param(fll_rate, int, 0444);
-+static bool codec_master;
-+module_param(codec_master, bool, 0444);
-+MODULE_PARM_DESC(codec_master, "codec drives BCLK/LRCLK (needs mclk2)");
-+
-+static int dream2lte_prepare(struct snd_pcm_substream *substream)
-+{
-+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
-+	struct snd_soc_component *codec = snd_soc_rtd_to_codec(rtd, 0)->component;
-+	struct snd_pcm_runtime *runtime = substream->runtime;
-+	unsigned int bclk = runtime->rate * runtime->channels *
-+			    snd_pcm_format_width(runtime->format);
-+	int ret;
-+
-+	if (mclk2)
-+		return 0;
-+
-+	/* ABOX starts BCLK in its hw_params, so it runs by now */
-+	ret = snd_soc_component_set_pll(codec, MADERA_FLL1_REFCLK,
-+					MADERA_FLL_SRC_AIF1BCLK, bclk,
-+					SYSCLK_RATE);
-+	if (ret)
-+		dev_err(rtd->dev, "FLL1 from BCLK %u: %d\n", bclk, ret);
-+
-+	return ret;
-+}
-+
-+static int dream2lte_hw_free(struct snd_pcm_substream *substream)
-+{
-+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
-+	struct snd_soc_component *codec = snd_soc_rtd_to_codec(rtd, 0)->component;
-+
-+	if (mclk2)
-+		return 0;
-+
-+	return snd_soc_component_set_pll(codec, MADERA_FLL1_REFCLK,
-+					 MADERA_FLL_SRC_NONE, 0, 0);
-+}
-+
-+static const struct snd_soc_ops dream2lte_ops = {
-+	.prepare	= dream2lte_prepare,
-+	.hw_free	= dream2lte_hw_free,
-+};
++#define MCLK1_RATE	26000000
 +
 +static int dream2lte_init(struct snd_soc_pcm_runtime *rtd)
 +{
 +	struct snd_soc_component *codec = snd_soc_rtd_to_codec(rtd, 0)->component;
 +	int ret;
 +
++	ret = snd_soc_component_set_pll(codec, MADERA_FLL1_REFCLK,
++					MADERA_FLL_SRC_MCLK1, MCLK1_RATE,
++					SYSCLK_RATE);
++	if (ret)
++		return ret;
++
 +	ret = snd_soc_component_set_sysclk(codec, MADERA_CLK_SYSCLK_1,
 +					   MADERA_CLK_SRC_FLL1, SYSCLK_RATE,
 +					   SND_SOC_CLOCK_IN);
 +	if (ret)
 +		return ret;
-+
-+	if (fll_test >= 0) {
-+		snd_soc_component_set_pll(codec, MADERA_FLL1_REFCLK,
-+					  MADERA_FLL_SRC_NONE, 0, 0);
-+		ret = snd_soc_component_set_pll(codec, MADERA_FLL1_REFCLK,
-+						fll_test, fll_rate, SYSCLK_RATE);
-+		dev_info(rtd->dev, "FLL1 test from source %d: %d\n",
-+			 fll_test, ret);
-+	}
-+
-+	if (mclk2) {
-+		ret = snd_soc_component_set_pll(codec, MADERA_FLL1_REFCLK,
-+						MADERA_FLL_SRC_MCLK2,
-+						MCLK2_RATE, SYSCLK_RATE);
-+		if (ret)
-+			return ret;
-+	}
 +
 +	return snd_soc_dai_set_sysclk(snd_soc_rtd_to_codec(rtd, 0),
 +				      MADERA_CLK_SYSCLK_1, 0, 0);
@@ -141,7 +74,6 @@ index 000000000..3389fe072
 +		.dai_fmt	= SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
 +				  SND_SOC_DAIFMT_CBC_CFC,
 +		.init		= dream2lte_init,
-+		.ops		= &dream2lte_ops,
 +		.playback_only	= 1,
 +		SND_SOC_DAILINK_REG(uaif0),
 +	},
@@ -179,9 +111,6 @@ index 000000000..3389fe072
 +	if (!link->cpus->of_node || !link->codecs->of_node)
 +		return dev_err_probe(dev, -EINVAL, "missing cpu or codec\n");
 +	link->platforms->of_node = link->cpus->of_node;
-+	if (mclk2 && codec_master)
-+		link->dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
-+				SND_SOC_DAIFMT_CBP_CFP;
 +
 +	card->dev = dev;
 +	return devm_snd_soc_register_card(dev, card);

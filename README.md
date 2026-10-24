@@ -34,7 +34,8 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; in Firefox for H.264/HEVC with the patched libavcodec below (1080p at ~4% CPU); VP9 in Firefox still in software |
 | Bluetooth | works (BCM4361 over UART1, BlueZ): pairing, A2DP headphones through PulseAudio. Needs the vendor patch file, see Rootfs notes |
 | USB host (OTG) | works through the USB-C controller (S2MM005) with 5 V from the charger. Devices without the CC resistor (cheap USB-C gadgets) aren't detected, also not by the Samsung kernel: `echo source > /sys/class/typec/port0/port_type` forces host mode, `dual` goes back (do that before plugging in a PC or charger) |
-| Audio, cameras, modem, USB 3, suspend | not supported yet (audio in progress; USB audio devices work) |
+| Audio | headphone jack playback works (ABOX with the vendor Calliope firmware, CS47L93 codec), 48 kHz; needs the firmware, see Rootfs notes. Loudspeaker, earpiece, mics and jack detection not yet. USB audio devices work |
+| Cameras, modem, USB 3, suspend | not supported yet |
 
 ## What's in the patches
 
@@ -250,6 +251,12 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
   A custom `default.pa` needs `module-udev-detect`, and a fixed
   `module-alsa-sink` must name its card (`hw:CARD=...`), not `hw:0,0`, or it
   grabs whatever card comes first
+- Audio: the ABOX firmware comes from the vendor partition:
+  `/vendor/firmware/calliope_{sram,dram,iva}.bin` to `/usr/lib/firmware/`,
+  and `SoundBoosterParam.bin`, `dsm.bin`, `dsm_tune.bin`,
+  `APBargeIn_AUDIO_SLSI.bin`, `APBiBF_AUDIO_SLSI.bin`, `AP_AUDIO_SLSI.bin`
+  to `/usr/lib/firmware/abox/`. [`rootfs/armtix-audio`](rootfs/armtix-audio)
+  (`/etc/init.d`) routes the codec to the headphone output on mainline
 - Bluetooth audio: install `pulseaudio-bluetooth`; a custom
   `~/.config/pulse/default.pa` must load `module-bluetooth-policy`,
   `module-bluetooth-discover` and `module-switch-on-connect` itself.

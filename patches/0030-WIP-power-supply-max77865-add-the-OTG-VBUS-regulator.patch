@@ -1,7 +1,7 @@
-From c023af937b38796f333054c14fcd5f88202327f5 Mon Sep 17 00:00:00 2001
+From 82667722234ee0555de130ff22e9e10ab9068b96 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 09:39:30 +0300
-Subject: [PATCH 30/33] WIP: power: supply: max77865: add the OTG VBUS
+Subject: [PATCH 30/34] WIP: power: supply: max77865: add the OTG VBUS
  regulator
 
 Provide the 5 V boost on CHGIN for USB host mode as a regulator, with

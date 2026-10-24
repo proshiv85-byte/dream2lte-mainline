@@ -1,7 +1,7 @@
-From 5f327cf5db4f987caad485496f1eb40601e5a022 Mon Sep 17 00:00:00 2001
+From 770eac88e7782c6973d9b741737342827e3a90c1 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 10:03:04 +0300
-Subject: [PATCH 33/33] WIP: wifi: brcmfmac: turn off BSS max idle on BCM4361
+Subject: [PATCH 33/34] WIP: wifi: brcmfmac: turn off BSS max idle on BCM4361
 
 The BCM4361 firmware of the Galaxy S8 (13.38.64) traps (data abort)
 while associating with some Wi-Fi 7 access points, on both bands, then

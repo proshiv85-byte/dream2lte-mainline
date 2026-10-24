@@ -1,7 +1,7 @@
-From eba756cc1e12847a53f21f8cdda52f656b52d72f Mon Sep 17 00:00:00 2001
+From 830a31d16d3d30a8273138b62aadc31b6801a120 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 09:39:30 +0300
-Subject: [PATCH 32/33] WIP: arm64: dts: exynos8895-dream2lte: USB-C role
+Subject: [PATCH 32/34] WIP: arm64: dts: exynos8895-dream2lte: USB-C role
  switching and host mode
 
 Add the S2MM005 Type-C controller on HSI2C30 (USI12), the charger's
@@ -14,7 +14,7 @@ Assisted-by: Claude Opus 5.5 (Anthropic)
  1 file changed, 63 insertions(+), 1 deletion(-)
 
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
-index 0eae22a7c..a3f982ebf 100644
+index d0e561049..732800f41 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
 +++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
 @@ -367,6 +367,12 @@ charger: charger@69 {
@@ -43,7 +43,7 @@ index 0eae22a7c..a3f982ebf 100644
  	key_power: key-power-pins {
  		samsung,pins = "gpa2-4";
  		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
-@@ -505,6 +517,48 @@ &usi1 {
+@@ -511,6 +523,48 @@ &usi1 {
  	status = "okay";
  };
  
@@ -92,7 +92,7 @@ index 0eae22a7c..a3f982ebf 100644
  &usi9 {
  	samsung,mode = <USI_MODE_I2C0_1>;
  
-@@ -522,8 +576,16 @@ &usbdrd {
+@@ -528,8 +582,16 @@ &usbdrd {
  };
  
  &usbdrd_dwc3 {

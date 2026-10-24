@@ -1,28 +1,32 @@
-From 33908ffee078bfc5ee7af89029f2b248aa78a69d Mon Sep 17 00:00:00 2001
+From 2d36c957319cdcacd8556295f68e58bb75a362c8 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:35:08 +0300
-Subject: [PATCH 24/33] WIP: ASoC: samsung: add an Exynos8895 ABOX driver
+Subject: [PATCH 24/34] WIP: ASoC: samsung: add an Exynos8895 ABOX driver
 
 Boot the vendor Calliope firmware on the ABOX Cortex-A7 and use its
 IPC protocol (messages in ABOX SRAM, SGIs through the GIC inside ABOX)
 to play PCM through RDMA0. The AP programs CMU_ABOX (PLL_AUD and the
-dividers), the SPUS/UAIF routing and the UAIF0 format, like the vendor
-driver does.
+dividers), the routing and the UAIF0 format, like the vendor driver
+does. UAIF0 is the I2S clock master.
 
 The firmware sees fixed IOVAs (DRAM at 0x80000000, IVA, VSS, the dump
 area and the PCM buffer). The buffers come from dma_alloc_coherent on a
 device behind the SysMMU, so they are already mapped at some IOVA; the
 driver maps their pages again at the addresses the firmware expects.
 
-Not working yet: the firmware boots and starts RDMA0, but nothing
-consumes the samples (the codec's FLL never locks).
+Playback goes RDMA0 -> SPUS mixer -> SIFS0 -> UAIF0 at 48 kHz. The
+vendor's ASRC in that path isn't set up for the stream rate by this
+driver and drained the RDMA about four times too fast, so it is left
+out. The firmware only signals the periods (RDMA0_BUF_EMPTY), not the
+position: that comes from the RDMA status, which tells which of two
+periods is read and how far, so the buffer is kept at two periods.
 
 Assisted-by: Claude Opus 5.5 (Anthropic)
 ---
- sound/soc/samsung/Kconfig           |  17 +
- sound/soc/samsung/Makefile          |   4 +
- sound/soc/samsung/exynos8895-abox.c | 978 ++++++++++++++++++++++++++++
- 3 files changed, 999 insertions(+)
+ sound/soc/samsung/Kconfig           |   17 +
+ sound/soc/samsung/Makefile          |    4 +
+ sound/soc/samsung/exynos8895-abox.c | 1022 +++++++++++++++++++++++++++
+ 3 files changed, 1043 insertions(+)
  create mode 100644 sound/soc/samsung/exynos8895-abox.c
 
 diff --git a/sound/soc/samsung/Kconfig b/sound/soc/samsung/Kconfig
@@ -74,10 +78,10 @@ index 8d5f09147..9f573ad77 100644
  obj-$(CONFIG_SND_SOC_SAMSUNG_MIDAS_WM1811) += snd-soc-midas-wm1811.o
 diff --git a/sound/soc/samsung/exynos8895-abox.c b/sound/soc/samsung/exynos8895-abox.c
 new file mode 100644
-index 000000000..80e2c3b15
+index 000000000..a0cbb2b8c
 --- /dev/null
 +++ b/sound/soc/samsung/exynos8895-abox.c
-@@ -0,0 +1,978 @@
+@@ -0,0 +1,1022 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Exynos8895 ABOX audio subsystem, playback through RDMA0 and UAIF0
@@ -164,9 +168,18 @@ index 000000000..80e2c3b15
 +#define SPUS_OUT		GENMASK(2, 1)
 +#define SPUS_OUT_SIFS0		1
 +
++#define ABOX_RDMA0_STATUS	0x1020
++#define RDMA_PROGRESS		BIT(31)
++#define RDMA_RBUF_OFFSET	GENMASK(28, 16)
++#define RDMA_RBUF_CNT		GENMASK(12, 0)
++
++#define ABOX_SPUS_CTRL1		0x0204
++#define SPUS_MIXP_FORMAT	GENMASK(4, 0)
++
 +#define ABOX_UAIF0_CTRL0	0x0500
 +#define UAIF_SPK_ENABLE		BIT(0)
-+#define UAIF_MODE_SLAVE		BIT(2)
++/* set: UAIF drives BCLK and LRCLK */
++#define UAIF_MODE_MASTER	BIT(2)
 +#define ABOX_UAIF0_CTRL1	0x0504
 +#define UAIF_FORMAT		GENMASK(28, 24)
 +#define UAIF_BCLK_POLARITY	BIT(23)
@@ -658,9 +671,13 @@ index 000000000..80e2c3b15
 +		abox_ipc(abox, &msg);
 +	}
 +
-+	/* the vendor default route: RDMA0 -> ASRC -> mixer (SIFS0) -> UAIF0 */
++	/*
++	 * RDMA0 -> mixer (SIFS0) -> UAIF0, without the vendor's ASRC: it
++	 * isn't set up for the stream rate and drains the RDMA almost four
++	 * times too fast. The stream runs at the mixer rate, 48 kHz.
++	 */
 +	abox_update(abox, ABOX_SPUS_CTRL0, SPUS_RDMA0,
-+		    SPUS_ASRC | FIELD_PREP(SPUS_OUT, SPUS_OUT_SIFS0));
++		    FIELD_PREP(SPUS_OUT, SPUS_OUT_SIFS0));
 +	abox_update(abox, ABOX_ROUTE_CTRL0, ROUTE_UAIF_SPK0,
 +		    FIELD_PREP(ROUTE_UAIF_SPK0, ROUTE_SIFS0));
 +}
@@ -689,8 +706,8 @@ index 000000000..80e2c3b15
 +	unsigned int bclk = params_rate(params) * channels * width;
 +	/* AUDIF the way the vendor driver picks it: 192 kHz frames */
 +	unsigned int audif = 192000 * width * 2;
-+	bool slave = (abox->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) ==
-+		     SND_SOC_DAIFMT_BC_FC;
++	bool master = (abox->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) ==
++		      SND_SOC_DAIFMT_BP_FP;
 +	u32 ctrl1;
 +	int ret;
 +
@@ -713,8 +730,11 @@ index 000000000..80e2c3b15
 +		FIELD_PREP(UAIF_SBIT_MAX, width - 1) |
 +		FIELD_PREP(UAIF_FORMAT, abox_format(width, channels));
 +	writel(ctrl1, abox->sfr + ABOX_UAIF0_CTRL1);
-+	abox_update(abox, ABOX_UAIF0_CTRL0, UAIF_MODE_SLAVE,
-+		    slave ? UAIF_MODE_SLAVE : 0);
++	/* the SPUS mixer output feeding SIFS0 has the same format */
++	abox_update(abox, ABOX_SPUS_CTRL1, SPUS_MIXP_FORMAT,
++		    FIELD_PREP(SPUS_MIXP_FORMAT, abox_format(width, channels)));
++	abox_update(abox, ABOX_UAIF0_CTRL0, UAIF_MODE_MASTER,
++		    master ? UAIF_MODE_MASTER : 0);
 +
 +	return 0;
 +}
@@ -790,8 +810,16 @@ index 000000000..80e2c3b15
 +	int ret;
 +
 +	snd_soc_set_runtime_hwparams(substream, &abox_pcm_hw);
-+	ret = snd_pcm_hw_constraint_integer(substream->runtime,
-+					    SNDRV_PCM_HW_PARAM_PERIODS);
++	/*
++	 * The RDMA status only tells which of two periods it reads and how
++	 * far, in 16 byte units: keep the buffer at two periods.
++	 */
++	ret = snd_pcm_hw_constraint_minmax(substream->runtime,
++					   SNDRV_PCM_HW_PARAM_PERIODS, 2, 2);
++	if (ret < 0)
++		return ret;
++	ret = snd_pcm_hw_constraint_step(substream->runtime, 0,
++					 SNDRV_PCM_HW_PARAM_PERIOD_BYTES, 16);
 +	if (ret < 0)
 +		return ret;
 +
@@ -863,7 +891,7 @@ index 000000000..80e2c3b15
 +	struct abox *abox = snd_soc_component_get_drvdata(component);
 +	struct abox_ipc_msg msg = { };
 +
-+	abox->pointer = IOVA_RDMA_BUFFER(0);
++	abox->pointer = 0;
 +	return abox_pcm_ipc(abox, PCM_PLTDAI_PREPARE, &msg);
 +}
 +
@@ -895,9 +923,29 @@ index 000000000..80e2c3b15
 +					  struct snd_pcm_substream *substream)
 +{
 +	struct abox *abox = snd_soc_component_get_drvdata(component);
-+	u32 pos = abox->pointer - IOVA_RDMA_BUFFER(0);
++	size_t buffer_bytes = snd_pcm_lib_buffer_bytes(substream);
++	size_t period_bytes = snd_pcm_lib_period_bytes(substream);
++	u32 status, offset, pos = 0;
 +
-+	if (pos >= snd_pcm_lib_buffer_bytes(substream))
++	if (abox->pointer >= IOVA_RDMA_BUFFER(0)) {
++		/* reported by the firmware */
++		pos = abox->pointer - IOVA_RDMA_BUFFER(0);
++	} else {
++		/*
++		 * The firmware only signals the periods (RDMA0_BUF_EMPTY):
++		 * read the position from the RDMA. The offset is the start of
++		 * the period being read, the count how far it got, both in
++		 * 16 byte units.
++		 */
++		status = readl(abox->sfr + ABOX_RDMA0_STATUS);
++		if (status & RDMA_PROGRESS) {
++			offset = FIELD_GET(RDMA_RBUF_OFFSET, status) << 4;
++			offset = rounddown(offset % buffer_bytes, period_bytes);
++			pos = offset + (FIELD_GET(RDMA_RBUF_CNT, status) << 4);
++		}
++	}
++
++	if (pos >= buffer_bytes)
 +		pos = 0;
 +
 +	return bytes_to_frames(substream->runtime, pos);

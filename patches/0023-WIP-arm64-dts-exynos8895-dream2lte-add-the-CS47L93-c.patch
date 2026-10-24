@@ -1,7 +1,7 @@
-From dccc146bc15dbfdb9f5f32c2edfe21af790abd4b Mon Sep 17 00:00:00 2001
+From a57e77dcb2bf6de6bf6d87cb05062b4919762185 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:35:08 +0300
-Subject: [PATCH 23/33] WIP: arm64: dts: exynos8895-dream2lte: add the CS47L93
+Subject: [PATCH 23/34] WIP: arm64: dts: exynos8895-dream2lte: add the CS47L93
  codec and sound card
 
 The Cirrus CS47L93 codec is on SPI3 (USI1), powered by LDO32 (1.8 V)
@@ -11,11 +11,11 @@ fed from AIF1, which is wired to ABOX UAIF0.
 
 Assisted-by: Claude Opus 5.5 (Anthropic)
 ---
- .../boot/dts/exynos/exynos8895-dream2lte.dts  | 89 +++++++++++++++++++
- 1 file changed, 89 insertions(+)
+ .../boot/dts/exynos/exynos8895-dream2lte.dts  | 95 +++++++++++++++++++
+ 1 file changed, 95 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
-index 1bdff0fb8..6a2898c82 100644
+index 1bdff0fb8..e096f61b7 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
 +++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
 @@ -121,6 +121,12 @@ gnss_if@ffc00000 {
@@ -42,7 +42,7 @@ index 1bdff0fb8..6a2898c82 100644
  &adc {
  	status = "okay";
  };
-@@ -417,6 +427,70 @@ key_wink: key-wink-pins {
+@@ -417,6 +427,76 @@ key_wink: key-wink-pins {
  	};
  };
  
@@ -69,6 +69,12 @@ index 1bdff0fb8..6a2898c82 100644
 +		pinctrl-names = "default";
 +
 +		reset-gpios = <&gpe7 0 GPIO_ACTIVE_LOW>;
++
++		/* MCLK1: 26 MHz from the SoC's XCLKOUT, the FLL1 reference */
++		clocks = <&pmu_system_controller 0>;
++		clock-names = "mclk1";
++		assigned-clocks = <&pmu_system_controller 0>;
++		assigned-clock-parents = <&oscclk>;
 +
 +		AVDD-supply = <&codec_vdd_1v8>;
 +		DBVDD1-supply = <&codec_vdd_1v8>;
@@ -113,7 +119,7 @@ index 1bdff0fb8..6a2898c82 100644
  &usi9 {
  	samsung,mode = <USI_MODE_I2C0_1>;
  
-@@ -456,6 +530,21 @@ sd_vqmmc: LDO2 {
+@@ -456,6 +536,21 @@ sd_vqmmc: LDO2 {
  				regulator-max-microvolt = <3300000>;
  			};
  

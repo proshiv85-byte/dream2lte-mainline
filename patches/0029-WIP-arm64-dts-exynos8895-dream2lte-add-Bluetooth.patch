@@ -1,7 +1,7 @@
-From 789bd72872c0e6022c1c86652555475ce3660ba1 Mon Sep 17 00:00:00 2001
+From 0852f54fc6576c9e88b774a18d12263123647a8b Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:52:46 +0300
-Subject: [PATCH 29/33] WIP: arm64: dts: exynos8895-dream2lte: add Bluetooth
+Subject: [PATCH 29/34] WIP: arm64: dts: exynos8895-dream2lte: add Bluetooth
 
 The BCM4361 Bluetooth is on UART1 (with RTS/CTS): BT_REG_ON on gpj1-7,
 device wake on gpj1-4, host wake on gpa2-3.
@@ -12,7 +12,7 @@ Assisted-by: Claude Opus 5.5 (Anthropic)
  1 file changed, 14 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
-index 6a2898c82..0eae22a7c 100644
+index e096f61b7..d0e561049 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
 +++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
 @@ -427,6 +427,20 @@ key_wink: key-wink-pins {

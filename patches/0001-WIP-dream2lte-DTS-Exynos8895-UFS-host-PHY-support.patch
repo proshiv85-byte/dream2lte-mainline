@@ -1,7 +1,7 @@
 From 49bc614f85325db9b9368401149bb39e1f0bd14a Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Wed, 21 Oct 2026 20:03:54 +0300
-Subject: [PATCH 01/33] WIP: dream2lte DTS, Exynos8895 UFS host + PHY support
+Subject: [PATCH 01/34] WIP: dream2lte DTS, Exynos8895 UFS host + PHY support
 
 Work in progress, to be split into proper patches.
 

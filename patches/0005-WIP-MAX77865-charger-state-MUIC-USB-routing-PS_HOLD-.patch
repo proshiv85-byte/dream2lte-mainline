@@ -1,7 +1,7 @@
 From 5a3237d2972ba2da948cee966f039a8bd3013c10 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Wed, 21 Oct 2026 21:05:56 +0300
-Subject: [PATCH 05/33] WIP: MAX77865 charger state + MUIC USB routing, PS_HOLD
+Subject: [PATCH 05/34] WIP: MAX77865 charger state + MUIC USB routing, PS_HOLD
  poweroff
 
 Assisted-by: Claude Opus 5.5 (Anthropic)

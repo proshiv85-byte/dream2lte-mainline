@@ -1,0 +1,47 @@
+#!/usr/bin/openrc-run
+# ARMtix audio: CS47L93 (madera) + Samsung ABOX DSP + MAX98506 speaker amp.
+# Firmware (/vendor/firmware/calliope_*.bin …) is fed by armtix-fwload.
+description="Audio routing (loudspeaker) for dream2lte"
+
+depend() {
+	need armtix-fwload
+	before xdm
+}
+
+start() {
+	ebegin "Setting up audio routing"
+	# mainline kernel: card "dream2lte" (ABOX UAIF0 -> CS47L93 AIF1), only
+	# the headphone output so far
+	if uname -r | grep -q dream2lte; then
+		for i in $(seq 1 30); do
+			[ -e /proc/asound/dream2lte ] && break
+			sleep 0.5
+		done
+		c="amixer -c dream2lte -q cset"
+		$c name="HPOUT2 Digital Switch" on &&
+		$c name="HPOUT2L Input 1" AIF1RX1 &&
+		$c name="HPOUT2R Input 1" AIF1RX2
+		eend $?
+		return
+	fi
+	# no udev rules on this kernel: give the sound devices to group audio
+	chgrp -R audio /dev/snd && chmod 660 /dev/snd/*
+	# the ABOX DSP firmware must be up before the mixer controls work
+	for i in $(seq 1 30); do
+		dmesg | grep -q "Calliope is ready to sing" && break
+		sleep 0.5
+	done
+	/usr/local/sbin/armtix-audio-route speaker >/dev/null 2>&1
+	# ARMtix overrides: Android sends the loudspeaker through Maxim DSM
+	# (speaker protection running in the DSP, feeding UAIF4 via SIFS1).
+	# That isn't triggered on Linux, so feed the amp (UAIF4) straight from
+	# the main mix and keep its hardware gain low + limiter on instead.
+	amixer -c0 -q cset name="ABOX ERAP info DSM On" 0
+	amixer -c0 -q cset name="ABOX UAIF SPK4" SIFS0
+	# only ONE UAIF may read SIFS0: two consumers drain it alternately and
+	# playback runs 2x fast (chipmunk pitch). Disconnect the codec (UAIF0).
+	amixer -c0 -q cset name="ABOX UAIF SPK0" RESERVED
+	amixer -c0 -q cset name="Speaker Gain" 10
+	amixer -c0 -q cset name="ALC Enable" on
+	eend 0
+}

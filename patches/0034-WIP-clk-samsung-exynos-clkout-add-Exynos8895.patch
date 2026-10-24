@@ -1,0 +1,28 @@
+From a6b84e9af71c52c587530ecea573229b54b47a48 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sat, 24 Oct 2026 10:44:09 +0300
+Subject: [PATCH 34/34] WIP: clk: samsung: exynos-clkout: add Exynos8895
+
+The Exynos8895 PMU has the same CLKOUT control as Exynos5 (PMU_DEBUG
+at 0xa00: disable bit 0, 5-bit mux from bit 8). On the Galaxy S8+ the
+XCLKOUT pad gives the audio codec its 26 MHz MCLK1.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/clk/samsung/clk-exynos-clkout.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/clk/samsung/clk-exynos-clkout.c b/drivers/clk/samsung/clk-exynos-clkout.c
+index 5f64d93b2..f1f687164 100644
+--- a/drivers/clk/samsung/clk-exynos-clkout.c
++++ b/drivers/clk/samsung/clk-exynos-clkout.c
+@@ -75,6 +75,9 @@ static const struct of_device_id exynos_clkout_ids[] = {
+ 	}, {
+ 		.compatible = "samsung,exynos5433-pmu",
+ 		.data = &exynos_clkout_exynos5,
++	}, {
++		.compatible = "samsung,exynos8895-pmu",
++		.data = &exynos_clkout_exynos5,
+ 	}, { }
+ };
+ 

@@ -1,7 +1,7 @@
-From 0d3a0966eeda04c3bb0a100b1415eab9e5a1f37c Mon Sep 17 00:00:00 2001
+From d87427aa8bbebb00c9526626158d48a19f9e2953 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:35:08 +0300
-Subject: [PATCH 22/33] WIP: arm64: dts: exynos8895: add ABOX, its SysMMU and
+Subject: [PATCH 22/34] WIP: arm64: dts: exynos8895: add ABOX, its SysMMU and
  power domain
 
 ABOX is the audio subsystem: a Cortex-A7 running the vendor firmware,
@@ -16,8 +16,8 @@ the oscillator as a placeholder.
 Assisted-by: Claude Opus 5.5 (Anthropic)
 ---
  .../boot/dts/exynos/exynos8895-pinctrl.dtsi   |  6 +++
- arch/arm64/boot/dts/exynos/exynos8895.dtsi    | 38 +++++++++++++++++++
- 2 files changed, 44 insertions(+)
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    | 42 +++++++++++++++++++
+ 2 files changed, 48 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895-pinctrl.dtsi b/arch/arm64/boot/dts/exynos/exynos8895-pinctrl.dtsi
 index 16903ce63..468219ebe 100644
@@ -37,7 +37,7 @@ index 16903ce63..468219ebe 100644
  
  &pinctrl_alive {
 diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
-index 9c1083dd9..95af2b593 100644
+index 9c1083dd9..66fdbec2a 100644
 --- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 +++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 @@ -1895,9 +1895,40 @@ mfc: codec@13ce0000 {
@@ -81,17 +81,21 @@ index 9c1083dd9..95af2b593 100644
  		};
  
  		pinctrl_vts: pinctrl@14080000 {
-@@ -1960,6 +1991,13 @@ pmu_system_controller: system-controller@16480000 {
+@@ -1958,6 +1989,17 @@ pmu_system_controller: system-controller@16480000 {
+ 			compatible = "samsung,exynos8895-pmu",
+ 				     "samsung,exynos7-pmu", "syscon";
  			reg = <0x16480000 0x10000>;
- 		};
- 
++			/* CLKOUT0 (XCLKOUT pad): input 1 is the 26 MHz TCXO */
++			#clock-cells = <1>;
++			clock-names = "clkout1";
++			clocks = <&oscclk>;
++		};
++
 +		pd_abox: power-domain@16484000 {
 +			compatible = "samsung,exynos5433-pd";
 +			reg = <0x16484000 0x20>;
 +			#power-domain-cells = <0>;
 +			label = "abox";
-+		};
-+
+ 		};
+ 
  		pinctrl_alive: pinctrl@164b0000 {
- 			compatible = "samsung,exynos8895-pinctrl";
- 			reg = <0x164b0000 0x1000>;
