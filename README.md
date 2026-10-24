@@ -32,7 +32,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | Reboot, reboot to recovery | works; hardware watchdog available |
 | Power off | wired up, not tested yet |
 | Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; in Firefox for H.264/HEVC with the patched libavcodec below (1080p at ~4% CPU); VP9 in Firefox still in software |
-| Bluetooth | works (BCM4361 over UART1, BlueZ): scanning; pairing not tested yet. Needs the vendor patch file, see Rootfs notes |
+| Bluetooth | works (BCM4361 over UART1, BlueZ): pairing, A2DP headphones through PulseAudio. Needs the vendor patch file, see Rootfs notes |
 | Audio, cameras, modem, USB 3 / host, suspend | not supported yet (audio in progress) |
 
 ## What's in the patches
@@ -244,6 +244,11 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
   [`rootfs/armtix-btaddr`](rootfs/armtix-btaddr) (`/etc/init.d`, default
   runlevel, with `bluetoothd`) sets the phone's real address from EFS; the
   chip starts with a placeholder one
+- Bluetooth audio: install `pulseaudio-bluetooth`; a custom
+  `~/.config/pulse/default.pa` must load `module-bluetooth-policy`,
+  `module-bluetooth-discover` and `module-switch-on-connect` itself.
+  Without a sound server registering A2DP, connecting a headset fails with
+  `br-connection-unknown`
 - [`rootfs/init-wrapper`](rootfs/init-wrapper): bring-up helper used with
   `DEV=1` builds; collects logs and returns to TWRP if USB networking does not
   come up
