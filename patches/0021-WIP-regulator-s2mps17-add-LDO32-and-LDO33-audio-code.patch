@@ -1,7 +1,7 @@
 From 6e34651fb23bfff3e613e778cd1b66841bfee271 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 22:16:56 +0300
-Subject: [PATCH 21/29] WIP: regulator: s2mps17: add LDO32 and LDO33 (audio
+Subject: [PATCH 21/32] WIP: regulator: s2mps17: add LDO32 and LDO33 (audio
  codec supplies)
 
 LDO32 (1.8 V) and LDO33 (1.2 V) power the CS47L93 audio codec on

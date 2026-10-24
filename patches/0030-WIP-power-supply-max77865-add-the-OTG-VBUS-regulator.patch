@@ -1,0 +1,191 @@
+From c023af937b38796f333054c14fcd5f88202327f5 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sat, 24 Oct 2026 09:39:30 +0300
+Subject: [PATCH 30/32] WIP: power: supply: max77865: add the OTG VBUS
+ regulator
+
+Provide the 5 V boost on CHGIN for USB host mode as a regulator, with
+the sequence of the vendor driver: OTG current limit 1.5 A, boost
+output 5.02 V, boost on, then the OTG switch 100 ms later.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/power/supply/Kconfig            |   1 +
+ drivers/power/supply/max77865_charger.c | 101 +++++++++++++++++++++++-
+ 2 files changed, 101 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index 140480c8d..379bc65d6 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -656,6 +656,7 @@ config CHARGER_MAX77759
+ config CHARGER_MAX77865
+ 	tristate "Maxim MAX77865 charger"
+ 	depends on I2C
++	depends on REGULATOR
+ 	select REGMAP_I2C
+ 	help
+ 	  Reports the state of the charger of the Maxim MAX77865 PMIC, used
+diff --git a/drivers/power/supply/max77865_charger.c b/drivers/power/supply/max77865_charger.c
+index d5e3c2099..98faaf08f 100644
+--- a/drivers/power/supply/max77865_charger.c
++++ b/drivers/power/supply/max77865_charger.c
+@@ -11,10 +11,12 @@
+  * charging stops if the system stops running.
+  *
+  * The driver also routes the USB data lines to the SoC with the MUIC, which
+- * the bootloader leaves open. Adaptive fast charging (9 V) is not done.
++ * the bootloader leaves open, and provides the 5 V boost on the USB port for
++ * USB host mode as a regulator. Adaptive fast charging (9 V) is not done.
+  */
+ 
+ #include <linux/bitfield.h>
++#include <linux/delay.h>
+ #include <linux/i2c.h>
+ #include <linux/minmax.h>
+ #include <linux/module.h>
+@@ -22,6 +24,7 @@
+ #include <linux/of.h>
+ #include <linux/power_supply.h>
+ #include <linux/regmap.h>
++#include <linux/regulator/driver.h>
+ #include <linux/thermal.h>
+ #include <linux/workqueue.h>
+ 
+@@ -32,11 +35,15 @@
+ #define MAX77865_CHG_DTLS		GENMASK(3, 0)
+ #define MAX77865_CHG_REG_CNFG_00	0xb7
+ #define MAX77865_CHG_CNFG_00_CHG	BIT(0)
++#define MAX77865_CHG_CNFG_00_OTG	BIT(1)
++#define MAX77865_CHG_CNFG_00_BOOST	BIT(3)
+ #define MAX77865_CHG_REG_CNFG_02	0xb9
+ #define MAX77865_CHG_CC			GENMASK(5, 0)
+ #define MAX77865_CHG_CC_STEP_UA		50000
+ #define MAX77865_CHG_CC_MIN_UA		100000
+ #define MAX77865_CHG_CC_MAX_UA		3150000
++#define MAX77865_CHG_OTG_ILIM		GENMASK(7, 6)
++#define MAX77865_CHG_OTG_ILIM_1500MA	0x3
+ #define MAX77865_CHG_REG_CNFG_03	0xba
+ #define MAX77865_CHG_TO_ITH		GENMASK(2, 0)
+ #define MAX77865_CHG_TO_ITH_MIN_UA	150000
+@@ -55,6 +62,9 @@
+ #define MAX77865_CHG_CHGIN_ILIM_STEP_UA	25000
+ #define MAX77865_CHG_CHGIN_ILIM_MIN_UA	100000
+ #define MAX77865_CHG_CHGIN_ILIM_MAX_UA	3175000
++#define MAX77865_CHG_REG_CNFG_11	0xc2
++/* boost output voltage: 3.485 V + 25 mV/step, 0x16 = 5.02 V */
++#define MAX77865_CHG_VBYPSET_OTG	0x16
+ 
+ #define MAX77865_MUIC_ADDR		0x25
+ #define MAX77865_MUIC_REG_STATUS1_BC	0x0d
+@@ -542,6 +552,85 @@ static const struct power_supply_desc max77865_charger_desc = {
+ 	.property_is_writeable = max77865_charger_property_is_writeable,
+ };
+ 
++/*
++ * USB host mode: boost the battery to 5 V on CHGIN, with the vendor's
++ * sequence (boost first, then the OTG switch) and 1.5 A current limit.
++ */
++static int max77865_otg_enable(struct regulator_dev *rdev)
++{
++	struct max77865_charger *chg = rdev_get_drvdata(rdev);
++	int ret;
++
++	ret = regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_02,
++				 MAX77865_CHG_OTG_ILIM,
++				 FIELD_PREP(MAX77865_CHG_OTG_ILIM,
++					    MAX77865_CHG_OTG_ILIM_1500MA));
++	if (ret)
++		return ret;
++
++	ret = regmap_write(chg->regmap, MAX77865_CHG_REG_CNFG_11,
++			   MAX77865_CHG_VBYPSET_OTG);
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_00,
++				 MAX77865_CHG_CNFG_00_OTG |
++				 MAX77865_CHG_CNFG_00_BOOST,
++				 MAX77865_CHG_CNFG_00_BOOST);
++	if (ret)
++		return ret;
++
++	msleep(100);
++
++	return regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_00,
++				  MAX77865_CHG_CNFG_00_OTG,
++				  MAX77865_CHG_CNFG_00_OTG);
++}
++
++static int max77865_otg_disable(struct regulator_dev *rdev)
++{
++	struct max77865_charger *chg = rdev_get_drvdata(rdev);
++	int ret;
++
++	ret = regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_00,
++				 MAX77865_CHG_CNFG_00_OTG |
++				 MAX77865_CHG_CNFG_00_BOOST, 0);
++	if (ret)
++		return ret;
++
++	return regmap_write(chg->regmap, MAX77865_CHG_REG_CNFG_11, 0);
++}
++
++static int max77865_otg_is_enabled(struct regulator_dev *rdev)
++{
++	struct max77865_charger *chg = rdev_get_drvdata(rdev);
++	unsigned int val;
++	int ret;
++
++	ret = regmap_read(chg->regmap, MAX77865_CHG_REG_CNFG_00, &val);
++	if (ret)
++		return ret;
++
++	return (val & (MAX77865_CHG_CNFG_00_OTG | MAX77865_CHG_CNFG_00_BOOST)) ==
++	       (MAX77865_CHG_CNFG_00_OTG | MAX77865_CHG_CNFG_00_BOOST);
++}
++
++static const struct regulator_ops max77865_otg_ops = {
++	.enable		= max77865_otg_enable,
++	.disable	= max77865_otg_disable,
++	.is_enabled	= max77865_otg_is_enabled,
++};
++
++static const struct regulator_desc max77865_otg_desc = {
++	.name		= "usb-otg-vbus",
++	.of_match	= "usb-otg-vbus",
++	.type		= REGULATOR_VOLTAGE,
++	.owner		= THIS_MODULE,
++	.ops		= &max77865_otg_ops,
++	.fixed_uV	= 5000000,
++	.n_voltages	= 1,
++};
++
+ static void max77865_charger_stop_poll(void *data)
+ {
+ 	struct max77865_charger *chg = data;
+@@ -609,7 +698,9 @@ static int max77865_charger_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+ 	struct power_supply_config psy_cfg = { };
++	struct regulator_config reg_cfg = { };
+ 	struct max77865_charger *chg;
++	struct regulator_dev *rdev;
+ 	int ret;
+ 
+ 	chg = devm_kzalloc(dev, sizeof(*chg), GFP_KERNEL);
+@@ -650,6 +741,14 @@ static int max77865_charger_probe(struct i2c_client *client)
+ 	if (ret)
+ 		return ret;
+ 
++	reg_cfg.dev = dev;
++	reg_cfg.driver_data = chg;
++	reg_cfg.regmap = chg->regmap;
++	rdev = devm_regulator_register(dev, &max77865_otg_desc, &reg_cfg);
++	if (IS_ERR(rdev))
++		return dev_err_probe(dev, PTR_ERR(rdev),
++				     "failed to register the OTG regulator\n");
++
+ 	INIT_DELAYED_WORK(&chg->poll, max77865_charger_poll);
+ 	ret = devm_add_action_or_reset(dev, max77865_charger_stop_poll, chg);
+ 	if (ret)

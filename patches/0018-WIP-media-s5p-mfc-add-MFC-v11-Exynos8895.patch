@@ -1,7 +1,7 @@
 From fd8055e6cd041cc8a13ca99a9763767437994680 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 18:15:53 +0300
-Subject: [PATCH 18/29] WIP: media: s5p-mfc: add MFC v11 (Exynos8895)
+Subject: [PATCH 18/32] WIP: media: s5p-mfc: add MFC v11 (Exynos8895)
 
 The Exynos8895 MFC (Samsung's "v11", version register 0x1100) has the
 v10 interface and formats. Variant with the vendor kernel's context

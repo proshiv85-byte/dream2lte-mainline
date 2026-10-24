@@ -7,10 +7,15 @@
 # (WLR_RENDERER=pixman) if that fails to start.
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 # libinput needs libudev device properties, and udevd doesn't work on 4.4:
-# use libudev-zero. sway has file capabilities (cap_sys_nice), so the dynamic
-# linker would ignore LD_LIBRARY_PATH; starting it through ld.so avoids that
-# (sway just runs without the capability). Apps started from sway inherit it.
-export LD_LIBRARY_PATH=/usr/lib/libudev-zero${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+# use libudev-zero there. sway has file capabilities (cap_sys_nice), so the
+# dynamic linker would ignore LD_LIBRARY_PATH; starting it through ld.so
+# avoids that (sway just runs without the capability). Apps started from sway
+# inherit it. Not on mainline, where udevd works: libudev-zero lacks the
+# properties of the udev rules, and PulseAudio skips hotplugged sound cards
+# (USB audio) without them.
+if ! uname -r | grep -q dream2lte; then
+	export LD_LIBRARY_PATH=/usr/lib/libudev-zero${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+fi
 SWAY="/usr/lib/ld-linux-aarch64.so.1 --argv0 sway /usr/bin/sway"
 export LIBSEAT_BACKEND=seatd
 export WLR_LIBINPUT_NO_DEVICES=1

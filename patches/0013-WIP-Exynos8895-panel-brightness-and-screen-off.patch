@@ -1,7 +1,7 @@
 From bf41e592d4e749a3d30cba8d37357941c34ce60c Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 16:09:19 +0300
-Subject: [PATCH 13/29] WIP: Exynos8895 panel brightness and screen off
+Subject: [PATCH 13/32] WIP: Exynos8895 panel brightness and screen off
 
 DECON driver: send DCS commands to the S6E3HA6 panel through the DSIM
 command FIFO (one packet at a time, like the vendor driver). The panel

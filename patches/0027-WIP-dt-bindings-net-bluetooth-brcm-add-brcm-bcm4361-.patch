@@ -1,7 +1,7 @@
 From 388004171a0941258e4b38ef4ccc5aa33102138f Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:52:46 +0300
-Subject: [PATCH 27/29] WIP: dt-bindings: net: bluetooth: brcm: add
+Subject: [PATCH 27/32] WIP: dt-bindings: net: bluetooth: brcm: add
  brcm,bcm4361-bt
 
 The Bluetooth part of the BCM4361 WiFi/Bluetooth combo chip, on a UART.

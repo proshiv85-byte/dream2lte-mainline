@@ -1,7 +1,7 @@
 From ae570f837f55d674ad4e7707618f5fe4fa2d9848 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 21:05:33 +0300
-Subject: [PATCH 20/29] WIP: media: s5p-mfc: let players restart and queue
+Subject: [PATCH 20/32] WIP: media: s5p-mfc: let players restart and queue
  frames (v10+)
 
 Fixes for Firefox (FFmpeg V4L2 decoding with DRM-PRIME frames):

@@ -1,7 +1,7 @@
 From 8d5559eb225b359c73cfd69cb21fec500668912f Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Thu, 22 Oct 2026 23:32:11 +0300
-Subject: [PATCH 11/29] WIP: Exynos8895 CPU idle (core power-down)
+Subject: [PATCH 11/32] WIP: Exynos8895 CPU idle (core power-down)
 
 PSCI CPU_SUSPEND idle state per cluster, values from the vendor kernel.
 The firmware only prepares the core; exynos8895-cpupm programs the

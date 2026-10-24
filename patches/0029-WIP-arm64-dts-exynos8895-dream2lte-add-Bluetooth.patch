@@ -1,7 +1,7 @@
 From 789bd72872c0e6022c1c86652555475ce3660ba1 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:52:46 +0300
-Subject: [PATCH 29/29] WIP: arm64: dts: exynos8895-dream2lte: add Bluetooth
+Subject: [PATCH 29/32] WIP: arm64: dts: exynos8895-dream2lte: add Bluetooth
 
 The BCM4361 Bluetooth is on UART1 (with RTS/CTS): BT_REG_ON on gpj1-7,
 device wake on gpj1-4, host wake on gpa2-3.

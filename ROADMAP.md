@@ -13,7 +13,7 @@ already works.
 | 2 | ~~Charger driver (MAX77865)~~ | **Done.** Charger type detection, 0.5 / 1.5 / 2.1 A, battery temperature limits, charger watchdog. | — | Follow-ups: 9 V adaptive fast charging (AFC, through the MUIC), interrupts instead of the 5 s poll, keeping the charger watchdog fed during suspend. |
 | 3 | **Vibration motor** | Haptic feedback, notifications. | S–M | Likely the MAX77865 haptic block (PWM) or a GPIO-driven motor; check the vendor DT. |
 | 4 | **Notification LED** | Small, easy win. | S | Check the vendor DT for which chip drives it. |
-| 5 | ~~Bluetooth (BCM4361)~~ | **Done.** `hci_bcm` on UART1 with the vendor `.hcd` patch, real address from EFS. | — | Follow-ups: test pairing (keyboard, headphones), Bluetooth audio (PulseAudio bluetooth modules), runtime PM through the wake GPIOs. |
+| 5 | ~~Bluetooth (BCM4361)~~ | **Done.** `hci_bcm` on UART1 with the vendor `.hcd` patch, real address from EFS; A2DP headphones work. | — | Follow-ups: a waybar/GUI for pairing, runtime PM through the wake GPIOs. |
 | 6 | **Power off** | Wired up but never tested. | S | Just test `poweroff` and check it really cuts power (no drain). |
 | 7 | **Suspend (s2idle, then deep sleep)** | The big one for battery life. | L–XL | Needs the screen off (#1), power domains (#9), wakeup sources (power key, RTC, USB), and the APM firmware's sleep path. s2idle first, it doesn't need the firmware. |
 
@@ -30,7 +30,7 @@ already works.
 
 | # | Item | Why it matters | Effort | Notes |
 |---|---|---|---|---|
-| 12 | **USB host / OTG, USB 3** | Plug in keyboards, drives; faster USB networking. | M–L | Needs the MUIC (#2) to detect OTG cables and switch the DWC3 role; USB 3 needs the SuperSpeed PHY. |
+| 12 | ~~USB host / OTG~~, USB 3 | **Host mode done** (S2MM005 Type-C driver, VBUS from the charger). | M–L | Follow-ups: test with a compliant device (OTG adapter); USB 3 needs the SuperSpeed PHY. |
 | 13 | **Audio** | Speaker, earpiece, headphone jack, mics. | XL | In progress (no sound yet): the CS47L93 codec probes over SPI, ABOX powers up and boots the vendor Calliope firmware, playback DMA starts. Blocker: the codec's FLL never locks, so nothing plays. Drivers are modules, blacklisted until this works. |
 | 14 | **Sensors** (accelerometer, gyro, light, proximity) | Auto-rotate, auto-brightness. | L–XL | They sit behind a sensor hub MCU with Samsung's own protocol. |
 | 15 | **NFC** | Low value on Linux. | M | Samsung S3NRN82; mainline `s3fwrn5` might cover it. |

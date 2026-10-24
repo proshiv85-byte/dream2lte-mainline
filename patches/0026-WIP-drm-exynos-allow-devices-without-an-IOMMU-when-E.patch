@@ -1,7 +1,7 @@
 From 9565b697f8aa49c4901e14c4aa95fd06e28fce73 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:43:09 +0300
-Subject: [PATCH 26/29] WIP: drm/exynos: allow devices without an IOMMU when
+Subject: [PATCH 26/32] WIP: drm/exynos: allow devices without an IOMMU when
  EXYNOS_IOMMU is set
 
 With CONFIG_EXYNOS_IOMMU enabled, exynos_drm_register_dma() wants
