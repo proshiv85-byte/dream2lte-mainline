@@ -1,0 +1,43 @@
+From 9565b697f8aa49c4901e14c4aa95fd06e28fce73 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sat, 24 Oct 2026 08:43:09 +0300
+Subject: [PATCH 26/26] WIP: drm/exynos: allow devices without an IOMMU when
+ EXYNOS_IOMMU is set
+
+With CONFIG_EXYNOS_IOMMU enabled, exynos_drm_register_dma() wants
+every sub-device behind a SysMMU and fails with -ENODEV otherwise. On
+Exynos8895 the DECON SysMMU is left in bypass (no iommus property),
+while another SysMMU (ABOX) needs the driver: enabling EXYNOS_IOMMU
+for it made the display fail to bind.
+
+Use plain DMA for a device that has no IOMMU, and skip the detach for
+it.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/gpu/drm/exynos/exynos_drm_dma.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_dma.c b/drivers/gpu/drm/exynos/exynos_drm_dma.c
+index 734741c80..ef03d9224 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_dma.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_dma.c
+@@ -100,7 +100,8 @@ int exynos_drm_register_dma(struct drm_device *drm, struct device *dev,
+ 			 dev_name(dev));
+ 	}
+ 
+-	if (!IS_ENABLED(CONFIG_EXYNOS_IOMMU))
++	/* a device without a SysMMU (or with it in bypass) uses plain DMA */
++	if (!IS_ENABLED(CONFIG_EXYNOS_IOMMU) || !device_iommu_mapped(dev))
+ 		return 0;
+ 
+ 	if (!priv->mapping) {
+@@ -123,7 +124,7 @@ int exynos_drm_register_dma(struct drm_device *drm, struct device *dev,
+ void exynos_drm_unregister_dma(struct drm_device *drm, struct device *dev,
+ 			       void **dma_priv)
+ {
+-	if (IS_ENABLED(CONFIG_EXYNOS_IOMMU))
++	if (IS_ENABLED(CONFIG_EXYNOS_IOMMU) && device_iommu_mapped(dev))
+ 		drm_iommu_detach_device(drm, dev, dma_priv);
+ }
+ 

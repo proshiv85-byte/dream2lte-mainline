@@ -1,7 +1,7 @@
 From 0d3a0966eeda04c3bb0a100b1415eab9e5a1f37c Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:35:08 +0300
-Subject: [PATCH 22/25] WIP: arm64: dts: exynos8895: add ABOX, its SysMMU and
+Subject: [PATCH 22/26] WIP: arm64: dts: exynos8895: add ABOX, its SysMMU and
  power domain
 
 ABOX is the audio subsystem: a Cortex-A7 running the vendor firmware,

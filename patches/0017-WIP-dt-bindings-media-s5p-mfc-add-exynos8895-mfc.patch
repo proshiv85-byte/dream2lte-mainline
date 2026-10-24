@@ -1,7 +1,7 @@
 From 1f1c7416f823f1e8f976ce48df127c06c40d09f3 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 18:15:52 +0300
-Subject: [PATCH 17/25] WIP: dt-bindings: media: s5p-mfc: add exynos8895-mfc
+Subject: [PATCH 17/26] WIP: dt-bindings: media: s5p-mfc: add exynos8895-mfc
 
 Assisted-by: Claude Opus 5.5 (Anthropic)
 ---

@@ -1,7 +1,7 @@
 From 33908ffee078bfc5ee7af89029f2b248aa78a69d Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 08:35:08 +0300
-Subject: [PATCH 24/25] WIP: ASoC: samsung: add an Exynos8895 ABOX driver
+Subject: [PATCH 24/26] WIP: ASoC: samsung: add an Exynos8895 ABOX driver
 
 Boot the vendor Calliope firmware on the ABOX Cortex-A7 and use its
 IPC protocol (messages in ABOX SRAM, SGIs through the GIC inside ABOX)
