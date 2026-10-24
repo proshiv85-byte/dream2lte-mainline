@@ -1,0 +1,1058 @@
+From 33908ffee078bfc5ee7af89029f2b248aa78a69d Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sat, 24 Oct 2026 08:35:08 +0300
+Subject: [PATCH 24/25] WIP: ASoC: samsung: add an Exynos8895 ABOX driver
+
+Boot the vendor Calliope firmware on the ABOX Cortex-A7 and use its
+IPC protocol (messages in ABOX SRAM, SGIs through the GIC inside ABOX)
+to play PCM through RDMA0. The AP programs CMU_ABOX (PLL_AUD and the
+dividers), the SPUS/UAIF routing and the UAIF0 format, like the vendor
+driver does.
+
+The firmware sees fixed IOVAs (DRAM at 0x80000000, IVA, VSS, the dump
+area and the PCM buffer). The buffers come from dma_alloc_coherent on a
+device behind the SysMMU, so they are already mapped at some IOVA; the
+driver maps their pages again at the addresses the firmware expects.
+
+Not working yet: the firmware boots and starts RDMA0, but nothing
+consumes the samples (the codec's FLL never locks).
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ sound/soc/samsung/Kconfig           |  17 +
+ sound/soc/samsung/Makefile          |   4 +
+ sound/soc/samsung/exynos8895-abox.c | 978 ++++++++++++++++++++++++++++
+ 3 files changed, 999 insertions(+)
+ create mode 100644 sound/soc/samsung/exynos8895-abox.c
+
+diff --git a/sound/soc/samsung/Kconfig b/sound/soc/samsung/Kconfig
+index ec7204f57..0a69eb3ac 100644
+--- a/sound/soc/samsung/Kconfig
++++ b/sound/soc/samsung/Kconfig
+@@ -148,4 +148,21 @@ config SND_SOC_SAMSUNG_MIDAS_WM1811
+ 	help
+ 	  Say Y if you want to add support for SoC audio on the Midas boards.
+ 
++config SND_SOC_SAMSUNG_EXYNOS8895_ABOX
++	tristate "Exynos8895 ABOX audio"
++	depends on SND_SOC_SAMSUNG && (ARCH_EXYNOS || COMPILE_TEST)
++	depends on IOMMU_API
++	help
++	  Say Y or M to drive the ABOX audio subsystem of Exynos8895 for
++	  playback. It boots the vendor Calliope firmware on the ABOX CPU,
++	  which runs the audio DMA.
++
++config SND_SOC_SAMSUNG_DREAM2LTE
++	tristate "Sound card for the Galaxy S8+ (dream2lte)"
++	depends on SND_SOC_SAMSUNG_EXYNOS8895_ABOX && MFD_CS47L92
++	select SND_SOC_CS47L92
++	help
++	  Say Y or M to add the sound card of the Samsung Galaxy S8+:
++	  ABOX playback to the CS47L93 codec.
++
+ endif #SND_SOC_SAMSUNG
+diff --git a/sound/soc/samsung/Makefile b/sound/soc/samsung/Makefile
+index 8d5f09147..9f573ad77 100644
+--- a/sound/soc/samsung/Makefile
++++ b/sound/soc/samsung/Makefile
+@@ -25,6 +25,8 @@ snd-soc-bells-y := bells.o
+ snd-soc-odroid-y := odroid.o
+ snd-soc-arndale-y := arndale.o
+ snd-soc-tm2-wm5110-y := tm2_wm5110.o
++snd-soc-exynos8895-abox-y := exynos8895-abox.o
++snd-soc-dream2lte-y := dream2lte.o
+ snd-soc-aries-wm8994-y := aries_wm8994.o
+ snd-soc-midas-wm1811-y := midas_wm1811.o
+ 
+@@ -40,5 +42,7 @@ obj-$(CONFIG_SND_SOC_BELLS) += snd-soc-bells.o
+ obj-$(CONFIG_SND_SOC_ODROID) += snd-soc-odroid.o
+ obj-$(CONFIG_SND_SOC_ARNDALE) += snd-soc-arndale.o
+ obj-$(CONFIG_SND_SOC_SAMSUNG_TM2_WM5110) += snd-soc-tm2-wm5110.o
++obj-$(CONFIG_SND_SOC_SAMSUNG_EXYNOS8895_ABOX) += snd-soc-exynos8895-abox.o
++obj-$(CONFIG_SND_SOC_SAMSUNG_DREAM2LTE) += snd-soc-dream2lte.o
+ obj-$(CONFIG_SND_SOC_SAMSUNG_ARIES_WM8994) += snd-soc-aries-wm8994.o
+ obj-$(CONFIG_SND_SOC_SAMSUNG_MIDAS_WM1811) += snd-soc-midas-wm1811.o
+diff --git a/sound/soc/samsung/exynos8895-abox.c b/sound/soc/samsung/exynos8895-abox.c
+new file mode 100644
+index 000000000..80e2c3b15
+--- /dev/null
++++ b/sound/soc/samsung/exynos8895-abox.c
+@@ -0,0 +1,978 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Exynos8895 ABOX audio subsystem, playback through RDMA0 and UAIF0
++ *
++ * ABOX contains a Cortex-A7 running Samsung's "Calliope" firmware, which owns
++ * the DMA engines. This driver boots that firmware (calliope_sram.bin,
++ * calliope_dram.bin, calliope_iva.bin from the vendor partition) and talks to
++ * it with the IPC protocol of the vendor kernel: messages in ABOX SRAM and
++ * software interrupts through the GIC inside ABOX. The routing (SPUS, UAIF)
++ * and the UAIF format are programmed from the AP, as the vendor driver does.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/firmware.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/iommu.h>
++#include <linux/iopoll.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++
++/* CMU_ABOX, inside the ABOX power domain and reset with it */
++#define CMU_PLL_CON0		0x0120
++#define CMU_PLL_CON3		0x012c
++#define CMU_MUX_CPU		0x1000
++#define CMU_MUX_UAIF0		0x1004
++#define CMU_DIV_AUDIF		0x1800
++#define CMU_DIV_BUS		0x1804
++#define CMU_DIV_BUSP		0x1808
++#define CMU_DIV_CPU_ACLK	0x180c
++#define CMU_DIV_CPU_ATCLK	0x1810
++#define CMU_DIV_CPU_PCLKDBG	0x1814
++#define CMU_DIV_DSIF		0x181c
++#define CMU_DIV_PLL		0x1820
++#define CMU_DIV_UAIF0		0x1828
++
++#define PLL_ENABLE		BIT(31)
++#define PLL_STABLE		BIT(29)
++#define PLL_MUX_SEL		BIT(4)
++#define PLL_M			GENMASK(25, 16)
++#define PLL_P			GENMASK(13, 8)
++#define PLL_S			GENMASK(2, 0)
++#define DIV_BUSY		BIT(16)
++
++/* PLL_AUD = 26 MHz * (45 + 24319 / 65536) = 1179.648 MHz */
++#define AUD_PLL_M		45
++#define AUD_PLL_P		1
++#define AUD_PLL_S		0
++#define AUD_PLL_K		24319
++#define AUD_PLL_RATE		1179648000
++
++/* PMU */
++#define PMU_GPIO_MODE_ABOX	0x1308
++#define PMU_PAD_RETENTION_ABOX	0x3048
++#define PAD_RETENTION_RELEASE	BIT(28)
++#define PMU_CA7_CONFIGURATION	0x2520
++#define PMU_CA7_STATUS		0x2524
++#define PMU_CA7_OPTION		0x2528
++#define CA7_LOCAL_PWR_CFG	BIT(0)
++#define CA7_STATUS_ON		BIT(0)
++#define CA7_ENABLE_CPU		BIT(15)
++
++/* ABOX SYSREG */
++#define SYSREG_L2_CACHE_CON	0x0328
++#define SYSREG_MISC_CON		0x032c
++
++/* ABOX SFR */
++#define ABOX_VERSION		0x0004
++#define ABOX_SYSPOWER_CTRL	0x0010	/* lets ABOX reach DRAM */
++#define ABOX_ROUTE_CTRL0	0x0040
++#define ROUTE_UAIF_SPK0		GENMASK(3, 0)
++#define ROUTE_SIFS0		1
++#define ABOX_SPUS_CTRL0		0x0200
++#define SPUS_RDMA0		GENMASK(3, 0)
++#define SPUS_ASRC		BIT(0)
++#define SPUS_OUT		GENMASK(2, 1)
++#define SPUS_OUT_SIFS0		1
++
++#define ABOX_UAIF0_CTRL0	0x0500
++#define UAIF_SPK_ENABLE		BIT(0)
++#define UAIF_MODE_SLAVE		BIT(2)
++#define ABOX_UAIF0_CTRL1	0x0504
++#define UAIF_FORMAT		GENMASK(28, 24)
++#define UAIF_BCLK_POLARITY	BIT(23)
++#define UAIF_SLOT_MAX		GENMASK(20, 18)
++#define UAIF_SBIT_MAX		GENMASK(17, 12)
++
++/* GIC inside ABOX, shared by its Cortex-A7 and the AP */
++#define GICD_CTLR		0x000
++#define GICD_IPRIORITYR		0x400
++#define GICD_SGIR		0xf00
++#define GICC_CTLR		0x000
++#define GICC_PMR		0x004
++#define GICC_IAR		0x00c
++#define GICC_EOIR		0x010
++#define GICC_DIR		0x1000
++
++/* SRAM mailbox, offsets from the vendor device tree */
++#define IPC_TX_OFFSET		0x30000
++#define IPC_TX_ACK_OFFSET	0x302fc
++#define IPC_RX_OFFSET		0x30300
++#define IPC_RX_ACK_OFFSET	0x305fc
++
++/* addresses as seen by the Cortex-A7 (through the ABOX SysMMU) */
++#define IOVA_DRAM_FIRMWARE	0x80000000
++#define DRAM_FIRMWARE_SIZE	(SZ_8M + SZ_4M)
++#define IOVA_RDMA_BUFFER(x)	(0x81000000 + SZ_1M * (x))
++#define IOVA_IVA_FIRMWARE	0x90000000
++#define IVA_FIRMWARE_SIZE	SZ_512K
++/* voice processing memory, shared with the modem on the vendor kernel */
++#define IOVA_VSS_FIRMWARE	0xa0000000
++#define VSS_SIZE		(SZ_4M + SZ_2M)
++/* debug dump area: the 4 MiB carve-out the bootloader reserves for ABOX */
++#define IOVA_DUMP_BUFFER	0xd0000000
++#define DUMP_PHYS		0xea800000
++#define DUMP_SIZE		SZ_4M
++
++/* IPC protocol of the Calliope firmware (vendor abox_ipc.h) */
++enum abox_ipc_id {
++	IPC_SYSTEM = 1,
++	IPC_PCMPLAYBACK = 2,
++	IPC_ABOX_CONFIG = 0xa,
++	RDMA0_BUF_EMPTY = 0xb,
++};
++
++enum abox_system_msg {
++	ABOX_SUSPEND = 1,
++	ABOX_RESUME = 2,
++	ABOX_BOOT_DONE = 3,
++	ABOX_REPORT_LOG = 0x10,
++	ABOX_REPORT_FAULT = 0xfa,
++};
++
++enum abox_pcm_msg {
++	PCM_PLTDAI_OPEN = 11,
++	PCM_PLTDAI_CLOSE = 12,
++	PCM_PLTDAI_HW_PARAMS = 14,
++	PCM_PLTDAI_HW_FREE = 15,
++	PCM_PLTDAI_PREPARE = 16,
++	PCM_PLTDAI_TRIGGER = 17,
++	PCM_PLTDAI_POINTER = 18,
++	PCM_SET_BUFFER = 20,
++};
++
++enum abox_config_msg {
++	SET_MIXER_SAMPLE_RATE = 1,
++	SET_INMUX4_SAMPLE_RATE = 9,
++};
++
++struct abox_ipc_msg {
++	u32 ipcid;
++	u32 task_id;
++	union {
++		struct {
++			u32 msgtype;
++			s32 param1;
++			s32 param2;
++			s32 param3;
++			u8 bundle[740];
++		} system;
++		struct {
++			u32 msgtype;
++			s32 channel_id;
++			union {
++				struct {
++					s32 sample_rate;
++					s32 bit_depth;
++					s32 channels;
++				} hw_params;
++				struct {
++					s32 phyaddr;
++					s32 size;
++					s32 count;
++				} setbuff;
++				u32 pointer;
++				s32 trigger;
++			} param;
++		} pcmtask;
++		struct {
++			u32 msgtype;
++			s32 param1;
++			s32 param2;
++		} config;
++	} msg;
++};
++
++#define ABOX_RATES		SNDRV_PCM_RATE_48000
++#define ABOX_FORMATS		(SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE)
++
++struct abox {
++	struct device *dev;
++	void __iomem *sfr;
++	void __iomem *cmu;
++	void __iomem *sysreg;
++	void __iomem *sram;
++	void __iomem *gicd;
++	void __iomem *gicc;
++	resource_size_t sram_size;
++	struct regmap *pmu;
++	struct iommu_domain *domain;
++
++	void *dram;
++	dma_addr_t dram_phys;	/* DMA addresses */
++	void *iva;
++	dma_addr_t iva_phys;
++
++	struct completion boot_done;
++	u32 version;
++	u32 log_addr;
++	spinlock_t ipc_lock;
++
++	unsigned int fmt;
++	struct snd_pcm_substream *substream;
++	u32 pointer;
++	bool buffer_mapped;
++};
++
++/* sample format code used by SPUS and UAIF */
++static unsigned int abox_format(unsigned int width, unsigned int channels)
++{
++	return ((width / 8 - 1) << 3) | (channels - 1);
++}
++
++static void abox_update(struct abox *abox, unsigned int reg, u32 mask, u32 val)
++{
++	writel((readl(abox->sfr + reg) & ~mask) | val, abox->sfr + reg);
++}
++
++static int abox_cmu_div(struct abox *abox, unsigned int reg, unsigned int ratio)
++{
++	u32 val;
++
++	writel(ratio, abox->cmu + reg);
++	return readl_poll_timeout_atomic(abox->cmu + reg, val, !(val & DIV_BUSY),
++					 1, 1000);
++}
++
++/* Bring CMU_ABOX from its reset state to what the vendor kernel uses */
++static int abox_cmu_init(struct abox *abox)
++{
++	u32 con0;
++	int ret;
++
++	con0 = readl(abox->cmu + CMU_PLL_CON0);
++	if ((con0 & (PLL_ENABLE | PLL_STABLE | PLL_MUX_SEL)) ==
++	    (PLL_ENABLE | PLL_STABLE | PLL_MUX_SEL))
++		return 0;
++
++	/*
++	 * Dividers first, the bus runs from the oscillator until the switch.
++	 * Cortex-A7 at PLL_AUD / 3 = 393 MHz like the vendor boot gear.
++	 */
++	ret = abox_cmu_div(abox, CMU_DIV_PLL, 2);
++	ret = ret ?: abox_cmu_div(abox, CMU_DIV_BUS, 1);
++	ret = ret ?: abox_cmu_div(abox, CMU_DIV_BUSP, 2);
++	ret = ret ?: abox_cmu_div(abox, CMU_DIV_CPU_ACLK, 1);
++	ret = ret ?: abox_cmu_div(abox, CMU_DIV_CPU_ATCLK, 1);
++	ret = ret ?: abox_cmu_div(abox, CMU_DIV_CPU_PCLKDBG, 7);
++	ret = ret ?: abox_cmu_div(abox, CMU_DIV_AUDIF, 23);
++	ret = ret ?: abox_cmu_div(abox, CMU_DIV_DSIF, 1);
++	if (ret)
++		return ret;
++	writel(0, abox->cmu + CMU_MUX_CPU);
++
++	writel(AUD_PLL_K, abox->cmu + CMU_PLL_CON3);
++	con0 = PLL_ENABLE | FIELD_PREP(PLL_M, AUD_PLL_M) |
++	       FIELD_PREP(PLL_P, AUD_PLL_P) | FIELD_PREP(PLL_S, AUD_PLL_S);
++	writel(con0, abox->cmu + CMU_PLL_CON0);
++	ret = readl_poll_timeout(abox->cmu + CMU_PLL_CON0, con0,
++				 con0 & PLL_STABLE, 10, 10000);
++	if (ret) {
++		dev_err(abox->dev, "PLL_AUD does not lock\n");
++		return ret;
++	}
++	writel(con0 | PLL_MUX_SEL, abox->cmu + CMU_PLL_CON0);
++
++	return 0;
++}
++
++static int abox_ipc(struct abox *abox, struct abox_ipc_msg *msg)
++{
++	unsigned long flags;
++	int i;
++
++	if (!abox->version)
++		return -EAGAIN;
++
++	spin_lock_irqsave(&abox->ipc_lock, flags);
++	memcpy_toio(abox->sram + IPC_TX_OFFSET, msg, sizeof(*msg));
++	writel(1, abox->sram + IPC_TX_ACK_OFFSET);
++	/* SGI to the Cortex-A7, the IPC id is the interrupt number */
++	writel(BIT(16) | (msg->ipcid & 0xf), abox->gicd + GICD_SGIR);
++	for (i = 1000; i && readl(abox->sram + IPC_TX_ACK_OFFSET); i--)
++		udelay(1);
++	spin_unlock_irqrestore(&abox->ipc_lock, flags);
++
++	if (!i) {
++		dev_warn_ratelimited(abox->dev, "IPC %u/%u timed out\n",
++				     msg->ipcid, msg->msg.pcmtask.msgtype);
++		return -ETIMEDOUT;
++	}
++	return 0;
++}
++
++static int abox_pcm_ipc(struct abox *abox, enum abox_pcm_msg type,
++			struct abox_ipc_msg *msg)
++{
++	msg->ipcid = IPC_PCMPLAYBACK;
++	msg->task_id = 0;
++	msg->msg.pcmtask.msgtype = type;
++	msg->msg.pcmtask.channel_id = 0;
++	return abox_ipc(abox, msg);
++}
++
++static void abox_handle_ipc(struct abox *abox, unsigned int irq)
++{
++	struct abox_ipc_msg msg;
++
++	if (irq == RDMA0_BUF_EMPTY) {
++		if (abox->substream)
++			snd_pcm_period_elapsed(abox->substream);
++		return;
++	}
++
++	memcpy_fromio(&msg, abox->sram + IPC_RX_OFFSET, sizeof(msg));
++	writel(0, abox->sram + IPC_RX_ACK_OFFSET);
++
++	switch (msg.ipcid) {
++	case IPC_SYSTEM:
++		if (msg.msg.system.msgtype == ABOX_BOOT_DONE) {
++			abox->version = msg.msg.system.param3;
++			complete(&abox->boot_done);
++		} else if (msg.msg.system.msgtype == ABOX_REPORT_LOG) {
++			abox->log_addr = msg.msg.system.param2;
++		} else if (msg.msg.system.msgtype == ABOX_REPORT_FAULT) {
++			dev_err(abox->dev, "firmware fault %d: %08x %08x\n",
++				msg.msg.system.param1, msg.msg.system.param2,
++				msg.msg.system.param3);
++		}
++		break;
++	case IPC_PCMPLAYBACK:
++		if (msg.msg.pcmtask.msgtype == PCM_PLTDAI_POINTER &&
++		    msg.msg.pcmtask.channel_id == 0) {
++			abox->pointer = msg.msg.pcmtask.param.pointer;
++			if (abox->substream)
++				snd_pcm_period_elapsed(abox->substream);
++		}
++		break;
++	default:
++		dev_dbg(abox->dev, "IPC %u from firmware\n", msg.ipcid);
++		break;
++	}
++	dev_dbg(abox->dev, "IPC %u/%u from firmware\n", msg.ipcid,
++		msg.msg.system.msgtype);
++}
++
++/* print the firmware's own log ring, for bring-up */
++static void abox_dump_log(struct abox *abox)
++{
++	u32 addr = abox->log_addr, writer, size;
++	char *buf, *cur, *line;
++	void *base;
++
++	if (!addr)
++		return;
++	if (addr < IOVA_DRAM_FIRMWARE) {
++		base = (void __force *)abox->sram + addr;
++		writer = readl(abox->sram + addr);
++		size = readl(abox->sram + addr + 8);
++	} else {
++		base = abox->dram + addr - IOVA_DRAM_FIRMWARE;
++		writer = ((u32 *)base)[0];
++		size = ((u32 *)base)[2];
++	}
++	size = min(size, (u32)SZ_64K);
++	writer = min(writer, size);
++	buf = kzalloc(writer + 1, GFP_KERNEL);
++	if (!buf)
++		return;
++	if (addr < IOVA_DRAM_FIRMWARE)
++		memcpy_fromio(buf, abox->sram + addr + 12, writer);
++	else
++		memcpy(buf, base + 12, writer);
++	cur = buf;
++	while ((line = strsep(&cur, "\n")))
++		if (*line)
++			dev_info(abox->dev, "fw: %s\n", line);
++	kfree(buf);
++}
++
++static irqreturn_t abox_irq(int irq, void *data)
++{
++	struct abox *abox = data;
++	u32 iar, nr;
++
++	for (;;) {
++		iar = readl(abox->gicc + GICC_IAR);
++		nr = iar & 0x3ff;
++		if (nr >= 1021)
++			break;
++		writel(iar, abox->gicc + GICC_EOIR);
++		if (nr < 16) {
++			writel(iar, abox->gicc + GICC_DIR);
++			abox_handle_ipc(abox, nr);
++		}
++	}
++
++	return IRQ_HANDLED;
++}
++
++static int abox_load(struct abox *abox, const char *name, void *dst,
++		     size_t max, bool io)
++{
++	const struct firmware *fw;
++	int ret;
++
++	ret = request_firmware(&fw, name, abox->dev);
++	if (ret)
++		return ret;
++	if (fw->size > max) {
++		release_firmware(fw);
++		return -EFBIG;
++	}
++	if (io)
++		memcpy_toio((void __iomem *)dst, fw->data, fw->size);
++	else
++		memcpy(dst, fw->data, fw->size);
++	release_firmware(fw);
++	return 0;
++}
++
++/* parameter files the firmware expects at fixed places of its DRAM */
++static const struct {
++	const char *name;
++	unsigned int offset;
++} abox_extra_fw[] = {
++	{ "abox/SoundBoosterParam.bin", 0x4fc000 },
++	{ "abox/dsm.bin", 0x502000 },
++	{ "abox/dsm_tune.bin", 0x601000 },
++	{ "abox/APBargeIn_AUDIO_SLSI.bin", 0x7ec000 },
++	{ "abox/APBiBF_AUDIO_SLSI.bin", 0x7ef000 },
++	{ "abox/AP_AUDIO_SLSI.bin", 0x7f0000 },
++};
++
++static int abox_map(struct abox *abox, unsigned long iova, phys_addr_t pa,
++		    size_t size, int prot)
++{
++	return iommu_map(abox->domain, iova, pa, size, prot, GFP_KERNEL);
++}
++
++/*
++ * The firmware wants its memories at fixed addresses. Buffers come from the
++ * DMA API, which maps them somewhere in the device's IOMMU domain; map their
++ * pages a second time where the firmware expects them.
++ */
++static int abox_alias(struct abox *abox, unsigned long iova, dma_addr_t dma,
++		      size_t size)
++{
++	size_t done;
++	phys_addr_t pa;
++	int ret;
++
++	for (done = 0; done < size; done += PAGE_SIZE) {
++		pa = iommu_iova_to_phys(abox->domain, dma + done);
++		if (!pa)
++			ret = -EFAULT;
++		else
++			ret = abox_map(abox, iova + done, pa, PAGE_SIZE,
++				       IOMMU_READ | IOMMU_WRITE);
++		if (ret) {
++			iommu_unmap(abox->domain, iova, done);
++			return ret;
++		}
++	}
++	return 0;
++}
++
++static int abox_boot(struct abox *abox)
++{
++	u32 status;
++	int ret, i;
++
++	ret = abox_cmu_init(abox);
++	if (ret)
++		return ret;
++
++	/* hold the Cortex-A7 while its memories are filled */
++	regmap_update_bits(abox->pmu, PMU_CA7_OPTION, CA7_ENABLE_CPU, 0);
++	regmap_update_bits(abox->pmu, PMU_CA7_CONFIGURATION, CA7_LOCAL_PWR_CFG, 0);
++
++	writel(1, abox->sysreg + SYSREG_MISC_CON);
++	writel(1, abox->sysreg + SYSREG_L2_CACHE_CON);
++
++	writel(0xff, abox->gicc + GICC_PMR);
++	writel(3, abox->gicd + GICD_CTLR);
++	for (i = 0; i < 40; i++)
++		writel(0x10101010, abox->gicd + GICD_IPRIORITYR + i * 4);
++	writel(3, abox->gicc + GICC_CTLR);
++
++	memset_io(abox->sram, 0, abox->sram_size);
++	ret = abox_load(abox, "calliope_sram.bin", (void __force *)abox->sram,
++			abox->sram_size, true);
++	ret = ret ?: abox_load(abox, "calliope_dram.bin", abox->dram,
++			       DRAM_FIRMWARE_SIZE, false);
++	ret = ret ?: abox_load(abox, "calliope_iva.bin", abox->iva,
++			       IVA_FIRMWARE_SIZE, false);
++	if (ret) {
++		dev_err(abox->dev, "firmware: %d\n", ret);
++		return ret;
++	}
++	for (i = 0; i < ARRAY_SIZE(abox_extra_fw); i++) {
++		ret = abox_load(abox, abox_extra_fw[i].name,
++				abox->dram + abox_extra_fw[i].offset,
++				SZ_1M, false);
++		if (ret)
++			dev_warn(abox->dev, "%s: %d\n", abox_extra_fw[i].name, ret);
++	}
++	dev_dbg(abox->dev, "dram %pad, iova %#x -> %pa\n", &abox->dram_phys,
++		IOVA_DRAM_FIRMWARE,
++		&(phys_addr_t){ iommu_iova_to_phys(abox->domain,
++						   IOVA_DRAM_FIRMWARE) });
++	/* the buffers are write-combined, make sure all of it is in DRAM */
++	wmb();
++
++	reinit_completion(&abox->boot_done);
++	writel(1, abox->sfr + ABOX_SYSPOWER_CTRL);
++	regmap_update_bits(abox->pmu, PMU_CA7_CONFIGURATION, CA7_LOCAL_PWR_CFG,
++			   CA7_LOCAL_PWR_CFG);
++	regmap_update_bits(abox->pmu, PMU_CA7_OPTION, CA7_ENABLE_CPU,
++			   CA7_ENABLE_CPU);
++	ret = regmap_read_poll_timeout(abox->pmu, PMU_CA7_STATUS, status,
++				       status & CA7_STATUS_ON, 10, 100000);
++	if (ret) {
++		dev_err(abox->dev, "Cortex-A7 does not start\n");
++		return ret;
++	}
++
++	/* release the pads held since the domain was powered off */
++	regmap_update_bits(abox->pmu, PMU_PAD_RETENTION_ABOX,
++			   PAD_RETENTION_RELEASE, PAD_RETENTION_RELEASE);
++	regmap_update_bits(abox->pmu, PMU_GPIO_MODE_ABOX, 1, 1);
++
++	if (!wait_for_completion_timeout(&abox->boot_done,
++					 msecs_to_jiffies(3000))) {
++		dev_err(abox->dev, "firmware does not boot, pc %08x\n",
++			readl(abox->sfr + 0x2c3c));
++		abox_dump_log(abox);
++		return -ETIMEDOUT;
++	}
++	dev_info(abox->dev, "Calliope firmware %c%c%c%c running\n",
++		 abox->version >> 24, abox->version >> 16 & 0xff,
++		 abox->version >> 8 & 0xff, abox->version & 0xff);
++
++	return 0;
++}
++
++static void abox_configure(struct abox *abox)
++{
++	struct abox_ipc_msg msg = { .ipcid = IPC_SYSTEM };
++	int i;
++
++	msg.msg.system.msgtype = ABOX_RESUME;
++	abox_ipc(abox, &msg);
++
++	for (i = SET_MIXER_SAMPLE_RATE; i <= SET_INMUX4_SAMPLE_RATE; i++) {
++		memset(&msg, 0, sizeof(msg));
++		msg.ipcid = IPC_ABOX_CONFIG;
++		msg.msg.config.msgtype = i;
++		msg.msg.config.param1 = 48000;
++		abox_ipc(abox, &msg);
++	}
++
++	/* the vendor default route: RDMA0 -> ASRC -> mixer (SIFS0) -> UAIF0 */
++	abox_update(abox, ABOX_SPUS_CTRL0, SPUS_RDMA0,
++		    SPUS_ASRC | FIELD_PREP(SPUS_OUT, SPUS_OUT_SIFS0));
++	abox_update(abox, ABOX_ROUTE_CTRL0, ROUTE_UAIF_SPK0,
++		    FIELD_PREP(ROUTE_UAIF_SPK0, ROUTE_SIFS0));
++}
++
++static int abox_dai_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
++{
++	struct abox *abox = snd_soc_dai_get_drvdata(dai);
++
++	if ((fmt & SND_SOC_DAIFMT_FORMAT_MASK) != SND_SOC_DAIFMT_I2S ||
++	    (fmt & SND_SOC_DAIFMT_INV_MASK) != SND_SOC_DAIFMT_NB_NF ||
++	    ((fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) != SND_SOC_DAIFMT_BP_FP &&
++	     (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) != SND_SOC_DAIFMT_BC_FC))
++		return -EINVAL;
++
++	abox->fmt = fmt;
++	return 0;
++}
++
++static int abox_dai_hw_params(struct snd_pcm_substream *substream,
++			      struct snd_pcm_hw_params *params,
++			      struct snd_soc_dai *dai)
++{
++	struct abox *abox = snd_soc_dai_get_drvdata(dai);
++	unsigned int width = params_width(params);
++	unsigned int channels = params_channels(params);
++	unsigned int bclk = params_rate(params) * channels * width;
++	/* AUDIF the way the vendor driver picks it: 192 kHz frames */
++	unsigned int audif = 192000 * width * 2;
++	bool slave = (abox->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) ==
++		     SND_SOC_DAIFMT_BC_FC;
++	u32 ctrl1;
++	int ret;
++
++	if (channels != 2 || AUD_PLL_RATE % audif || audif % bclk ||
++	    audif / bclk > 32)
++		return -EINVAL;
++
++	ret = abox_cmu_div(abox, CMU_DIV_AUDIF, AUD_PLL_RATE / audif - 1);
++	if (ret)
++		return ret;
++
++	writel(0, abox->cmu + CMU_MUX_UAIF0);
++	ret = abox_cmu_div(abox, CMU_DIV_UAIF0, audif / bclk - 1);
++	if (ret)
++		return ret;
++
++	/* I2S, normal polarity */
++	ctrl1 = UAIF_BCLK_POLARITY |
++		FIELD_PREP(UAIF_SLOT_MAX, channels - 1) |
++		FIELD_PREP(UAIF_SBIT_MAX, width - 1) |
++		FIELD_PREP(UAIF_FORMAT, abox_format(width, channels));
++	writel(ctrl1, abox->sfr + ABOX_UAIF0_CTRL1);
++	abox_update(abox, ABOX_UAIF0_CTRL0, UAIF_MODE_SLAVE,
++		    slave ? UAIF_MODE_SLAVE : 0);
++
++	return 0;
++}
++
++static int abox_dai_trigger(struct snd_pcm_substream *substream, int cmd,
++			    struct snd_soc_dai *dai)
++{
++	struct abox *abox = snd_soc_dai_get_drvdata(dai);
++
++	switch (cmd) {
++	case SNDRV_PCM_TRIGGER_START:
++	case SNDRV_PCM_TRIGGER_RESUME:
++	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		abox_update(abox, ABOX_UAIF0_CTRL0, UAIF_SPK_ENABLE,
++			    UAIF_SPK_ENABLE);
++		break;
++	}
++	return 0;
++}
++
++static void abox_dai_shutdown(struct snd_pcm_substream *substream,
++			      struct snd_soc_dai *dai)
++{
++	struct abox *abox = snd_soc_dai_get_drvdata(dai);
++
++	/* disabled only here to avoid pops, like the vendor driver */
++	abox_update(abox, ABOX_UAIF0_CTRL0, UAIF_SPK_ENABLE, 0);
++}
++
++static const struct snd_soc_dai_ops abox_dai_ops = {
++	.set_fmt	= abox_dai_set_fmt,
++	.hw_params	= abox_dai_hw_params,
++	.trigger	= abox_dai_trigger,
++	.shutdown	= abox_dai_shutdown,
++};
++
++static struct snd_soc_dai_driver abox_dai = {
++	.name = "abox-uaif0",
++	.playback = {
++		.stream_name	= "UAIF0 Playback",
++		.channels_min	= 2,
++		.channels_max	= 2,
++		.rates		= ABOX_RATES,
++		.formats	= ABOX_FORMATS,
++	},
++	.ops = &abox_dai_ops,
++};
++
++static const struct snd_pcm_hardware abox_pcm_hw = {
++	.info			= SNDRV_PCM_INFO_INTERLEAVED |
++				  SNDRV_PCM_INFO_MMAP |
++				  SNDRV_PCM_INFO_MMAP_VALID |
++				  SNDRV_PCM_INFO_BLOCK_TRANSFER,
++	.formats		= ABOX_FORMATS,
++	.rates			= ABOX_RATES,
++	.rate_min		= 48000,
++	.rate_max		= 48000,
++	.channels_min		= 2,
++	.channels_max		= 2,
++	/* vendor limits */
++	.buffer_bytes_max	= SZ_128K,
++	.period_bytes_min	= SZ_128,
++	.period_bytes_max	= SZ_32K,
++	.periods_min		= 2,
++	.periods_max		= 32,
++};
++
++static int abox_pcm_open(struct snd_soc_component *component,
++			 struct snd_pcm_substream *substream)
++{
++	struct abox *abox = snd_soc_component_get_drvdata(component);
++	struct abox_ipc_msg msg = { };
++	int ret;
++
++	snd_soc_set_runtime_hwparams(substream, &abox_pcm_hw);
++	ret = snd_pcm_hw_constraint_integer(substream->runtime,
++					    SNDRV_PCM_HW_PARAM_PERIODS);
++	if (ret < 0)
++		return ret;
++
++	abox->substream = substream;
++	return abox_pcm_ipc(abox, PCM_PLTDAI_OPEN, &msg);
++}
++
++static int abox_pcm_close(struct snd_soc_component *component,
++			  struct snd_pcm_substream *substream)
++{
++	struct abox *abox = snd_soc_component_get_drvdata(component);
++	struct abox_ipc_msg msg = { };
++
++	abox_pcm_ipc(abox, PCM_PLTDAI_CLOSE, &msg);
++	abox->substream = NULL;
++	return 0;
++}
++
++static int abox_pcm_hw_params(struct snd_soc_component *component,
++			      struct snd_pcm_substream *substream,
++			      struct snd_pcm_hw_params *params)
++{
++	struct abox *abox = snd_soc_component_get_drvdata(component);
++	struct abox_ipc_msg msg = { };
++	int ret;
++
++	if (abox->buffer_mapped)
++		iommu_unmap(abox->domain, IOVA_RDMA_BUFFER(0),
++			    substream->dma_buffer.bytes);
++	/* all of the preallocated area: the RDMA reads ahead of the end */
++	ret = abox_alias(abox, IOVA_RDMA_BUFFER(0), substream->dma_buffer.addr,
++			 substream->dma_buffer.bytes);
++	if (ret)
++		return ret;
++	abox->buffer_mapped = true;
++
++	msg.msg.pcmtask.param.setbuff.phyaddr = IOVA_RDMA_BUFFER(0);
++	msg.msg.pcmtask.param.setbuff.size = params_period_bytes(params);
++	msg.msg.pcmtask.param.setbuff.count = params_periods(params);
++	ret = abox_pcm_ipc(abox, PCM_SET_BUFFER, &msg);
++	if (ret)
++		return ret;
++
++	memset(&msg, 0, sizeof(msg));
++	msg.msg.pcmtask.param.hw_params.sample_rate = params_rate(params);
++	msg.msg.pcmtask.param.hw_params.bit_depth = params_width(params);
++	msg.msg.pcmtask.param.hw_params.channels = params_channels(params);
++	return abox_pcm_ipc(abox, PCM_PLTDAI_HW_PARAMS, &msg);
++}
++
++static int abox_pcm_hw_free(struct snd_soc_component *component,
++			    struct snd_pcm_substream *substream)
++{
++	struct abox *abox = snd_soc_component_get_drvdata(component);
++	struct abox_ipc_msg msg = { };
++
++	abox_pcm_ipc(abox, PCM_PLTDAI_HW_FREE, &msg);
++	if (abox->buffer_mapped) {
++		iommu_unmap(abox->domain, IOVA_RDMA_BUFFER(0),
++			    substream->dma_buffer.bytes);
++		abox->buffer_mapped = false;
++	}
++	return 0;
++}
++
++static int abox_pcm_prepare(struct snd_soc_component *component,
++			    struct snd_pcm_substream *substream)
++{
++	struct abox *abox = snd_soc_component_get_drvdata(component);
++	struct abox_ipc_msg msg = { };
++
++	abox->pointer = IOVA_RDMA_BUFFER(0);
++	return abox_pcm_ipc(abox, PCM_PLTDAI_PREPARE, &msg);
++}
++
++static int abox_pcm_trigger(struct snd_soc_component *component,
++			    struct snd_pcm_substream *substream, int cmd)
++{
++	struct abox *abox = snd_soc_component_get_drvdata(component);
++	struct abox_ipc_msg msg = { };
++
++	switch (cmd) {
++	case SNDRV_PCM_TRIGGER_START:
++	case SNDRV_PCM_TRIGGER_RESUME:
++	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		msg.msg.pcmtask.param.trigger = 1;
++		break;
++	case SNDRV_PCM_TRIGGER_STOP:
++	case SNDRV_PCM_TRIGGER_SUSPEND:
++	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
++		msg.msg.pcmtask.param.trigger = 0;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return abox_pcm_ipc(abox, PCM_PLTDAI_TRIGGER, &msg);
++}
++
++static snd_pcm_uframes_t abox_pcm_pointer(struct snd_soc_component *component,
++					  struct snd_pcm_substream *substream)
++{
++	struct abox *abox = snd_soc_component_get_drvdata(component);
++	u32 pos = abox->pointer - IOVA_RDMA_BUFFER(0);
++
++	if (pos >= snd_pcm_lib_buffer_bytes(substream))
++		pos = 0;
++
++	return bytes_to_frames(substream->runtime, pos);
++}
++
++static int abox_pcm_new(struct snd_soc_component *component,
++			struct snd_soc_pcm_runtime *rtd)
++{
++	/* fixed size, it is mapped for the firmware as a whole */
++	snd_pcm_set_managed_buffer_all(rtd->pcm, SNDRV_DMA_TYPE_DEV,
++				       component->dev, SZ_128K, SZ_128K);
++	return 0;
++}
++
++static const struct snd_soc_component_driver abox_component = {
++	.name		= "exynos8895-abox",
++	.open		= abox_pcm_open,
++	.close		= abox_pcm_close,
++	.hw_params	= abox_pcm_hw_params,
++	.hw_free	= abox_pcm_hw_free,
++	.prepare	= abox_pcm_prepare,
++	.trigger	= abox_pcm_trigger,
++	.pointer	= abox_pcm_pointer,
++	.pcm_new	= abox_pcm_new,
++};
++
++static int abox_setup_memory(struct abox *abox)
++{
++	struct device *dev = abox->dev;
++	dma_addr_t vss_dma;
++	void *vss;
++	int ret;
++
++	abox->domain = iommu_get_domain_for_dev(dev);
++	if (!abox->domain)
++		return -ENODEV;
++
++	abox->dram = dmam_alloc_coherent(dev, DRAM_FIRMWARE_SIZE,
++					 &abox->dram_phys, GFP_KERNEL);
++	abox->iva = dmam_alloc_coherent(dev, IVA_FIRMWARE_SIZE,
++					&abox->iva_phys, GFP_KERNEL);
++	vss = dmam_alloc_coherent(dev, VSS_SIZE, &vss_dma, GFP_KERNEL);
++	if (!abox->dram || !abox->iva || !vss)
++		return -ENOMEM;
++
++	ret = abox_alias(abox, IOVA_DRAM_FIRMWARE, abox->dram_phys,
++			 DRAM_FIRMWARE_SIZE);
++	ret = ret ?: abox_alias(abox, IOVA_IVA_FIRMWARE, abox->iva_phys,
++				IVA_FIRMWARE_SIZE);
++	ret = ret ?: abox_alias(abox, IOVA_VSS_FIRMWARE, vss_dma, VSS_SIZE);
++	ret = ret ?: abox_map(abox, IOVA_DUMP_BUFFER, DUMP_PHYS, DUMP_SIZE,
++			      IOMMU_READ | IOMMU_WRITE);
++	/* the firmware also reads the PMU and the chip id directly */
++	ret = ret ?: abox_map(abox, 0x16480000, 0x16480000, SZ_64K,
++			      IOMMU_READ | IOMMU_WRITE | IOMMU_MMIO);
++	ret = ret ?: abox_map(abox, 0x10000000, 0x10000000, PAGE_SIZE,
++			      IOMMU_READ | IOMMU_MMIO);
++	return ret;
++}
++
++static int abox_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct resource *res;
++	struct abox *abox;
++	int irq, ret;
++
++	abox = devm_kzalloc(dev, sizeof(*abox), GFP_KERNEL);
++	if (!abox)
++		return -ENOMEM;
++	abox->dev = dev;
++	init_completion(&abox->boot_done);
++	spin_lock_init(&abox->ipc_lock);
++
++	abox->sfr = devm_platform_ioremap_resource_byname(pdev, "sfr");
++	if (IS_ERR(abox->sfr))
++		return PTR_ERR(abox->sfr);
++	abox->cmu = devm_platform_ioremap_resource_byname(pdev, "cmu");
++	if (IS_ERR(abox->cmu))
++		return PTR_ERR(abox->cmu);
++	abox->sysreg = devm_platform_ioremap_resource_byname(pdev, "sysreg");
++	if (IS_ERR(abox->sysreg))
++		return PTR_ERR(abox->sysreg);
++	abox->gicd = devm_platform_ioremap_resource_byname(pdev, "gicd");
++	if (IS_ERR(abox->gicd))
++		return PTR_ERR(abox->gicd);
++	abox->gicc = devm_platform_ioremap_resource_byname(pdev, "gicc");
++	if (IS_ERR(abox->gicc))
++		return PTR_ERR(abox->gicc);
++	abox->sram = devm_platform_get_and_ioremap_resource(pdev, 3, &res);
++	if (IS_ERR(abox->sram))
++		return PTR_ERR(abox->sram);
++	abox->sram_size = resource_size(res);
++
++	abox->pmu = syscon_regmap_lookup_by_phandle(dev->of_node,
++						    "samsung,pmu-syscon");
++	if (IS_ERR(abox->pmu))
++		return PTR_ERR(abox->pmu);
++
++	irq = platform_get_irq(pdev, 0);
++	if (irq < 0)
++		return irq;
++
++	ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (ret)
++		return ret;
++
++	platform_set_drvdata(pdev, abox);
++
++	/* keeps the power domain on; CMU_ABOX would be reset otherwise */
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret)
++		return ret;
++
++	ret = abox_setup_memory(abox);
++	if (ret)
++		return dev_err_probe(dev, ret, "memory setup\n");
++
++	ret = devm_request_irq(dev, irq, abox_irq, 0, dev_name(dev), abox);
++	if (ret)
++		return ret;
++
++	dev_info(dev, "ABOX version %08x\n", readl(abox->sfr + ABOX_VERSION));
++	ret = abox_boot(abox);
++	if (ret) {
++		/* bring-up: stay bound and powered for inspection */
++		dev_err(dev, "boot failed: %d\n", ret);
++		return 0;
++	}
++	abox_configure(abox);
++
++	return devm_snd_soc_register_component(dev, &abox_component,
++					       &abox_dai, 1);
++}
++
++static const struct of_device_id abox_of_match[] = {
++	{ .compatible = "samsung,exynos8895-abox" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, abox_of_match);
++
++static struct platform_driver abox_driver = {
++	.driver = {
++		.name = "exynos8895-abox",
++		.of_match_table = abox_of_match,
++	},
++	.probe = abox_probe,
++};
++module_platform_driver(abox_driver);
++
++MODULE_DESCRIPTION("Exynos8895 ABOX audio");
++MODULE_LICENSE("GPL");
++MODULE_FIRMWARE("calliope_sram.bin");
++MODULE_FIRMWARE("calliope_dram.bin");
++MODULE_FIRMWARE("calliope_iva.bin");

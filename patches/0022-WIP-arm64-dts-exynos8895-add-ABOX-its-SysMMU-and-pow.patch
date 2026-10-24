@@ -1,0 +1,97 @@
+From 0d3a0966eeda04c3bb0a100b1415eab9e5a1f37c Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sat, 24 Oct 2026 08:35:08 +0300
+Subject: [PATCH 22/25] WIP: arm64: dts: exynos8895: add ABOX, its SysMMU and
+ power domain
+
+ABOX is the audio subsystem: a Cortex-A7 running the vendor firmware,
+the audio DMA, the I2S interfaces (UAIF) and a SysMMU in front of it,
+all in the ABOX power domain (the PMU at 0x16484000, same layout as
+Exynos5433). The ABOX pin controller is in that domain too.
+
+The SysMMU clock is a CMU_ABOX gate; there is no CMU_ABOX clock driver
+yet, so the ABOX driver programs CMU_ABOX itself and the SysMMU gets
+the oscillator as a placeholder.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../boot/dts/exynos/exynos8895-pinctrl.dtsi   |  6 +++
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    | 38 +++++++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-pinctrl.dtsi b/arch/arm64/boot/dts/exynos/exynos8895-pinctrl.dtsi
+index 16903ce63..468219ebe 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-pinctrl.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895-pinctrl.dtsi
+@@ -32,6 +32,12 @@ gph3: gph3-gpio-bank {
+ 		interrupt-controller;
+ 		#interrupt-cells = <2>;
+ 	};
++
++	aud_codec_bus: aud-codec-bus-pins {
++		samsung,pins = "gph0-1", "gph0-2", "gph0-3", "gph0-4";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
++	};
+ };
+ 
+ &pinctrl_alive {
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index 9c1083dd9..95af2b593 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -1895,9 +1895,40 @@ mfc: codec@13ce0000 {
+ 			 */
+ 		};
+ 
++		sysmmu_abox: iommu@13e30000 {
++			compatible = "samsung,exynos-sysmmu";
++			reg = <0x13e30000 0x10000>;
++			interrupts = <GIC_SPI 445 IRQ_TYPE_LEVEL_HIGH>;
++			/*
++			 * The real clock is a gate of CMU_ABOX, which has no
++			 * clock driver yet and is left running.
++			 */
++			clocks = <&oscclk>;
++			clock-names = "sysmmu";
++			power-domains = <&pd_abox>;
++			#iommu-cells = <0>;
++		};
++
++		abox: audio-controller@13e50000 {
++			compatible = "samsung,exynos8895-abox";
++			reg = <0x13e50000 0x10000>, <0x13e00000 0x4000>,
++			      <0x13e20000 0x1000>, <0x13f00000 0x31000>,
++			      <0x13ef1000 0x1000>, <0x13ef2000 0x2000>;
++			reg-names = "sfr", "cmu", "sysreg", "sram", "gicd", "gicc";
++			interrupts = <GIC_SPI 442 IRQ_TYPE_LEVEL_HIGH>;
++			iommus = <&sysmmu_abox>;
++			power-domains = <&pd_abox>;
++			samsung,pmu-syscon = <&pmu_system_controller>;
++			pinctrl-0 = <&aud_codec_bus>;
++			pinctrl-names = "default";
++			#sound-dai-cells = <0>;
++			status = "disabled";
++		};
++
+ 		pinctrl_abox: pinctrl@13e60000 {
+ 			compatible = "samsung,exynos8895-pinctrl";
+ 			reg = <0x13e60000 0x1000>;
++			power-domains = <&pd_abox>;
+ 		};
+ 
+ 		pinctrl_vts: pinctrl@14080000 {
+@@ -1960,6 +1991,13 @@ pmu_system_controller: system-controller@16480000 {
+ 			reg = <0x16480000 0x10000>;
+ 		};
+ 
++		pd_abox: power-domain@16484000 {
++			compatible = "samsung,exynos5433-pd";
++			reg = <0x16484000 0x20>;
++			#power-domain-cells = <0>;
++			label = "abox";
++		};
++
+ 		pinctrl_alive: pinctrl@164b0000 {
+ 			compatible = "samsung,exynos8895-pinctrl";
+ 			reg = <0x164b0000 0x1000>;

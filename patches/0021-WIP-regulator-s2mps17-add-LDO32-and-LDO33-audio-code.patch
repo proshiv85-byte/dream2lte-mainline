@@ -1,0 +1,46 @@
+From 6e34651fb23bfff3e613e778cd1b66841bfee271 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Fri, 23 Oct 2026 22:16:56 +0300
+Subject: [PATCH 21/25] WIP: regulator: s2mps17: add LDO32 and LDO33 (audio
+ codec supplies)
+
+LDO32 (1.8 V) and LDO33 (1.2 V) power the CS47L93 audio codec on
+dream2lte. Register and voltage steps from the vendor s2mps17 driver:
+LDO32 0x5d, 700 mV + 25 mV/step; LDO33 0x5e, 700 mV + 12.5 mV/step.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/regulator/s2mps17-regulator.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/regulator/s2mps17-regulator.c b/drivers/regulator/s2mps17-regulator.c
+index f7101aa0f..df2d4847d 100644
+--- a/drivers/regulator/s2mps17-regulator.c
++++ b/drivers/regulator/s2mps17-regulator.c
+@@ -16,6 +16,8 @@
+ #include <linux/regulator/of_regulator.h>
+ 
+ #define S2MPS17_REG_L2CTRL		0x3e
++#define S2MPS17_REG_L32CTRL		0x5d
++#define S2MPS17_REG_L33CTRL		0x5e
+ #define S2MPS17_REG_L34CTRL		0x5f
+ #define S2MPS17_REG_L35CTRL		0x60
+ 
+@@ -28,6 +30,8 @@
+ 
+ enum s2mps17_regulators {
+ 	S2MPS17_LDO2,
++	S2MPS17_LDO32,
++	S2MPS17_LDO33,
+ 	S2MPS17_LDO34,
+ 	S2MPS17_LDO35,
+ 	S2MPS17_REGULATOR_MAX,
+@@ -65,6 +69,8 @@ static const struct regulator_ops s2mps17_ldo_ops = {
+ 
+ static const struct regulator_desc s2mps17_regulators[] = {
+ 	S2MPS17_LDO(2, 1800000, 25000),
++	S2MPS17_LDO(32, 700000, 25000),
++	S2MPS17_LDO(33, 700000, 12500),
+ 	S2MPS17_LDO(34, 700000, 25000),
+ 	S2MPS17_LDO(35, 1800000, 25000),
+ };

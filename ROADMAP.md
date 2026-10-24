@@ -31,7 +31,7 @@ already works.
 | # | Item | Why it matters | Effort | Notes |
 |---|---|---|---|---|
 | 12 | **USB host / OTG, USB 3** | Plug in keyboards, drives; faster USB networking. | M–L | Needs the MUIC (#2) to detect OTG cables and switch the DWC3 role; USB 3 needs the SuperSpeed PHY. |
-| 13 | **Audio** | Speaker, earpiece, headphone jack, mics. | XL | Cirrus Logic codec + Samsung ABOX DSP, no mainline support for ABOX. Hardest of the useful items. |
+| 13 | **Audio** | Speaker, earpiece, headphone jack, mics. | XL | In progress (no sound yet): the CS47L93 codec probes over SPI, ABOX powers up and boots the vendor Calliope firmware, playback DMA starts. Blocker: the codec's FLL never locks, so nothing plays. Drivers are modules, blacklisted until this works. |
 | 14 | **Sensors** (accelerometer, gyro, light, proximity) | Auto-rotate, auto-brightness. | L–XL | They sit behind a sensor hub MCU with Samsung's own protocol. |
 | 15 | **NFC** | Low value on Linux. | M | Samsung S3NRN82; mainline `s3fwrn5` might cover it. |
 | 16 | **Modem, cameras, fingerprint, iris** | — | XL | Proprietary firmware/protocols or secure-world only. Probably not worth it. |
