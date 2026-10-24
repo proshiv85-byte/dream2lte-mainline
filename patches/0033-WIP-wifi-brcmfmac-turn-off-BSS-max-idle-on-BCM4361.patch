@@ -1,0 +1,62 @@
+From 5f327cf5db4f987caad485496f1eb40601e5a022 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sat, 24 Oct 2026 10:03:04 +0300
+Subject: [PATCH 33/33] WIP: wifi: brcmfmac: turn off BSS max idle on BCM4361
+
+The BCM4361 firmware of the Galaxy S8 (13.38.64) traps (data abort)
+while associating with some Wi-Fi 7 access points, on both bands, then
+the driver reloads it and the connection never comes up. Clearing
+WL_WNM_MAXIDLE in the "wnm" iovar (default 0x205) avoids it: with only
+BSS transition and the rest left on it associates normally.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../wireless/broadcom/brcm80211/brcmfmac/common.c  | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
+index b6027d83e..20966c5ba 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
+@@ -8,6 +8,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/module.h>
+ #include <linux/firmware.h>
++#include <brcm_hw_ids.h>
+ #include <brcmu_wifi.h>
+ #include <brcmu_utils.h>
+ #include "core.h"
+@@ -27,6 +28,8 @@ MODULE_LICENSE("Dual BSD/GPL");
+ 
+ #define BRCMF_DEFAULT_SCAN_CHANNEL_TIME	40
+ #define BRCMF_DEFAULT_SCAN_UNASSOC_TIME	40
++/* "wnm" iovar: BSS max idle period support */
++#define BRCMF_WNM_MAXIDLE		BIT(2)
+ 
+ /* default boost value for RSSI_DELTA in preferred join selection */
+ #define BRCMF_JOIN_PREF_RSSI_BOOST	8
+@@ -272,6 +275,7 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
+ 	struct brcmf_rev_info *ri;
+ 	char *clmver;
+ 	char *ptr;
++	u32 wnm;
+ 	s32 err;
+ 
+ 	if (is_valid_ether_addr(ifp->mac_addr)) {
+@@ -452,6 +456,16 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
+ 
+ 	/* Enable tx beamforming, errors can be ignored (not supported) */
+ 	(void)brcmf_fil_iovar_int_set(ifp, "txbf", 1);
++
++	/*
++	 * The BCM4361 firmware (13.38) traps while associating with some
++	 * Wi-Fi 7 access points unless its BSS max idle support is off.
++	 */
++	if (drvr->bus_if->chip == BRCM_CC_4361_CHIP_ID &&
++	    !brcmf_fil_iovar_int_get(ifp, "wnm", &wnm) &&
++	    (wnm & BRCMF_WNM_MAXIDLE))
++		(void)brcmf_fil_iovar_int_set(ifp, "wnm",
++					      wnm & ~BRCMF_WNM_MAXIDLE);
+ done:
+ 	return err;
+ }

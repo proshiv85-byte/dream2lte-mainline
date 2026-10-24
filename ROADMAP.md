@@ -39,7 +39,7 @@ already works.
 ## Known glitches
 
 - **"CPU1 failed to come online"**: seen once in about 16 boots; not reproduced since.
-- **WiFi**: hotspot / P2P and power saving not tried.
+- **WiFi**: hotspot / P2P and power saving not tried. Wi-Fi 7 routers crashed the firmware on association (its BSS max idle support); patch 0033 turns that off.
 - **Display**: no plane blend-mode property; full power-up from off is missing, which suspend will need.
 
 ## Housekeeping

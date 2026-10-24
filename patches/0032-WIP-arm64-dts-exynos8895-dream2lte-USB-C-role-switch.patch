@@ -1,7 +1,7 @@
 From eba756cc1e12847a53f21f8cdda52f656b52d72f Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 09:39:30 +0300
-Subject: [PATCH 32/32] WIP: arm64: dts: exynos8895-dream2lte: USB-C role
+Subject: [PATCH 32/33] WIP: arm64: dts: exynos8895-dream2lte: USB-C role
  switching and host mode
 
 Add the S2MM005 Type-C controller on HSI2C30 (USI12), the charger's

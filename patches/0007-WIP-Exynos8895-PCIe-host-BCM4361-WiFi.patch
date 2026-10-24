@@ -1,7 +1,7 @@
 From e4b7e17ed965a5166d56ecfdc2967b34082a74c4 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Thu, 22 Oct 2026 19:01:02 +0300
-Subject: [PATCH 07/32] WIP: Exynos8895 PCIe host + BCM4361 WiFi
+Subject: [PATCH 07/33] WIP: Exynos8895 PCIe host + BCM4361 WiFi
 
 New pcie-exynos8895 DWC glue: PHY/reset sequence from the vendor kernel,
 WLAN_REG_ON as vpcie3v3 regulator, PERST# via reset-gpios, INTx only.

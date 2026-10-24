@@ -1,7 +1,7 @@
 From c54ba98f55c669f0fb3add249f8aa7384960304d Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 09:39:30 +0300
-Subject: [PATCH 31/32] WIP: usb: typec: add a Samsung S2MM005 driver
+Subject: [PATCH 31/33] WIP: usb: typec: add a Samsung S2MM005 driver
 
 The S2MM005 (Galaxy S8/S8+) runs Type-C and USB PD in its own
 firmware; read its function state on each interrupt and switch the USB
