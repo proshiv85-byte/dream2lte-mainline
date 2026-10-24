@@ -1,7 +1,7 @@
 From 623e95741a8694e0b21136423b9f410f6679348e Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Thu, 22 Oct 2026 19:11:32 +0300
-Subject: [PATCH 08/26] WIP: Exynos8895 Mali-G71 GPU for panfrost
+Subject: [PATCH 08/29] WIP: Exynos8895 Mali-G71 GPU for panfrost
 
 DT node for the Mali-G71 MP20 (arm,mali-bifrost), its clock is the ACPM
 G3D DVFS clock (the APM firmware sets the voltage), OPPs 260-546 MHz from

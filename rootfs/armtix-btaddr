@@ -1,0 +1,33 @@
+#!/usr/bin/openrc-run
+# Bluetooth address for the mainline kernel: the BCM4361 comes up with a
+# default address (43:47:B0:00:1F:AC), which the kernel treats as "not
+# configured". The real one is in the EFS partition (/efs/bluetooth/bt_addr);
+# set it before bluetoothd starts. Installed as /etc/init.d/armtix-btaddr.
+description="Set the Bluetooth address from EFS"
+depend() { need localmount; before bluetoothd; }
+start() {
+	ebegin "Setting the Bluetooth address"
+	# hci_uart loads from udev, give it a moment
+	n=0
+	while [ ! -e /sys/class/bluetooth/hci0 ] && [ $n -lt 20 ]; do
+		sleep 0.5; n=$((n + 1))
+	done
+	if [ ! -e /sys/class/bluetooth/hci0 ]; then
+		eend 0 "no hci0"; return 0
+	fi
+	addr=$(cat /etc/bluetooth/bt_addr 2>/dev/null)
+	if [ -z "$addr" ]; then
+		m=$(mktemp -d)
+		if mount -o ro,noload /dev/disk/by-partlabel/EFS "$m"; then
+			addr=$(cat "$m/bluetooth/bt_addr" 2>/dev/null)
+			umount "$m"
+		fi
+		rmdir "$m"
+		[ -n "$addr" ] && echo "$addr" > /etc/bluetooth/bt_addr
+	fi
+	if [ -z "$addr" ]; then
+		eend 1 "no address in EFS"; return 1
+	fi
+	btmgmt --index 0 public-addr "$addr" >/dev/null
+	eend $?
+}

@@ -13,7 +13,7 @@ already works.
 | 2 | ~~Charger driver (MAX77865)~~ | **Done.** Charger type detection, 0.5 / 1.5 / 2.1 A, battery temperature limits, charger watchdog. | — | Follow-ups: 9 V adaptive fast charging (AFC, through the MUIC), interrupts instead of the 5 s poll, keeping the charger watchdog fed during suspend. |
 | 3 | **Vibration motor** | Haptic feedback, notifications. | S–M | Likely the MAX77865 haptic block (PWM) or a GPIO-driven motor; check the vendor DT. |
 | 4 | **Notification LED** | Small, easy win. | S | Check the vendor DT for which chip drives it. |
-| 5 | **Bluetooth (BCM4361)** | Headphones, keyboards. Same chip as WiFi, BT side is on a UART. | M | `hci_bcm` over serdev + the Samsung `.hcd` patch firmware; needs the UART node, BT_REG_ON / wake GPIOs. |
+| 5 | ~~Bluetooth (BCM4361)~~ | **Done.** `hci_bcm` on UART1 with the vendor `.hcd` patch, real address from EFS. | — | Follow-ups: test pairing (keyboard, headphones), Bluetooth audio (PulseAudio bluetooth modules), runtime PM through the wake GPIOs. |
 | 6 | **Power off** | Wired up but never tested. | S | Just test `poweroff` and check it really cuts power (no drain). |
 | 7 | **Suspend (s2idle, then deep sleep)** | The big one for battery life. | L–XL | Needs the screen off (#1), power domains (#9), wakeup sources (power key, RTC, USB), and the APM firmware's sleep path. s2idle first, it doesn't need the firmware. |
 

@@ -1,7 +1,7 @@
 From 6df15cad374aba361c366db755e0b233306d0795 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Fri, 23 Oct 2026 16:32:17 +0300
-Subject: [PATCH 16/26] WIP: dream2lte charger: cable type, current limits,
+Subject: [PATCH 16/29] WIP: dream2lte charger: cable type, current limits,
  battery temperature
 
 MAX77865 charger:

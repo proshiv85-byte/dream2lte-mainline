@@ -32,7 +32,8 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | Reboot, reboot to recovery | works; hardware watchdog available |
 | Power off | wired up, not tested yet |
 | Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; in Firefox for H.264/HEVC with the patched libavcodec below (1080p at ~4% CPU); VP9 in Firefox still in software |
-| Bluetooth, audio, cameras, modem, USB 3 / host, suspend | not supported yet |
+| Bluetooth | works (BCM4361 over UART1, BlueZ): scanning; pairing not tested yet. Needs the vendor patch file, see Rootfs notes |
+| Audio, cameras, modem, USB 3 / host, suspend | not supported yet (audio in progress) |
 
 ## What's in the patches
 
@@ -236,6 +237,13 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
 - [`rootfs/firefox-user.js`](rootfs/firefox-user.js): Firefox settings for
   the phone (copy to the profile as `user.js`): pinch zoom in and out with
   phone-style page layout
+- Bluetooth: install `bluez bluez-utils bluez-openrc` and copy the patch
+  file from the vendor partition, `/vendor/firmware/bcm4361B0_semco.hcd` (or
+  `_murata`, whichever matches the `WIFI` entry in
+  `/efs/FactoryApp/HwPartInform`), to `/usr/lib/firmware/brcm/BCM4347B0.hcd`.
+  [`rootfs/armtix-btaddr`](rootfs/armtix-btaddr) (`/etc/init.d`, default
+  runlevel, with `bluetoothd`) sets the phone's real address from EFS; the
+  chip starts with a placeholder one
 - [`rootfs/init-wrapper`](rootfs/init-wrapper): bring-up helper used with
   `DEV=1` builds; collects logs and returns to TWRP if USB networking does not
   come up
