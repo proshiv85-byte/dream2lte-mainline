@@ -1,0 +1,197 @@
+#!/sbin/sh
+# ARMtix (Artix Linux aarch64) installer for Samsung Galaxy S8+ Exynos
+# (SM-G955F, dream2lte), mainline kernel. Run from TWRP: Install -> this zip.
+#
+#  - FORMATS USERDATA (internal storage, sda27) as ext4 and installs the
+#    ARMtix root filesystem there, plus the mainline kernel modules. The SD
+#    card is not touched.
+#  - Copies the Samsung firmware (WiFi, Bluetooth, audio, video decoder) from
+#    this phone's VENDOR partition and the CPU frequency plugin from the
+#    Samsung kernel in BOOT (or TWRP's in RECOVERY): the zip contains no
+#    Samsung blobs.
+#  - Flashes the mainline kernel to BOOT.
+# Afterwards: TWRP -> Reboot -> System.
+
+OUTFD=$2
+ZIP=$3
+W=/tmp/armtix-install
+ROOT=/armtix_root
+VENMNT=/armtix_vendor
+EFSMNT=/armtix_efs
+FS_UUID=1337beef-8d1a-4f00-b00b-c0ffee5a5a5a
+SWAP_MB=4096
+FW=$ROOT/usr/lib/firmware
+DVFS=exynos8895_acpm_dvfs.fw
+DVFS_SHA256=a272830513378dc2fc5bfa23a3d08dbff38fffdf47b5b6c3de572cd4d0eea7e2
+
+ui() { printf 'ui_print %s\nui_print\n' "$*" > /proc/self/fd/$OUTFD; }
+progress() { printf 'set_progress %s\n' "$1" > /proc/self/fd/$OUTFD; }
+cleanup() {
+	umount $VENMNT 2>/dev/null; umount $EFSMNT 2>/dev/null
+	umount $ROOT 2>/dev/null
+	rm -rf $W
+}
+abort() { ui " "; ui "!!! ERROR: $*"; ui "!!! Nothing was changed after this point."; cleanup; exit 1; }
+
+ui "=============================================="
+ui "  ARMtix Linux for Galaxy S8+ (dream2lte)"
+ui "  mainline kernel"
+ui "=============================================="
+
+rm -rf $W; mkdir -p $W
+unzip -o "$ZIP" armtix/busybox -d $W >/dev/null 2>&1 || abort "cannot unpack busybox"
+BB=$W/armtix/busybox
+chmod 755 $BB
+$BB unzip -o "$ZIP" armtix/boot.img armtix/kfw armtix/caps.txt armtix/build-info \
+	armtix/sha256sums -d $W >/dev/null 2>&1 \
+	|| abort "cannot unpack installer files"
+chmod 755 $W/armtix/kfw
+. $W/armtix/build-info 2>/dev/null
+ui "Build: ${BUILD_DATE:-?}  kernel ${KERNEL_VERSION:-?}"
+
+# ---------------------------------------------------------------- checks
+BL=$(getprop ro.boot.bootloader)
+[ -z "$BL" ] && BL=$(getprop ro.bootloader)
+case "$BL" in
+	G955F*) ui "Device: SM-G955F ($BL)" ;;
+	*) abort "this zip is only for the Galaxy S8+ Exynos (SM-G955F); bootloader is '$BL'" ;;
+esac
+BOOT=$(readlink -f /dev/block/by-name/BOOT)
+RECOVERY=$(readlink -f /dev/block/by-name/RECOVERY)
+DATA=$(readlink -f /dev/block/by-name/USERDATA)
+VENDOR=$(readlink -f /dev/block/by-name/VENDOR)
+EFS=$(readlink -f /dev/block/by-name/EFS)
+[ -b "$BOOT" ] || abort "BOOT partition not found"
+[ "$DATA" = /dev/block/sda27 ] || abort "USERDATA is '$DATA', the kernel expects /dev/block/sda27"
+
+ui "Verifying zip contents ..."
+sumof() { $BB unzip -p "$ZIP" "armtix/$1" | $BB sha256sum | cut -d' ' -f1; }
+want() { $BB grep " $1\$" $W/armtix/sha256sums | cut -d' ' -f1; }
+[ "$($BB sha256sum < $W/armtix/boot.img | cut -d' ' -f1)" = "$(want boot.img)" ] || abort "boot.img checksum mismatch"
+for f in rootfs.tar.xz mainline.tar.xz; do
+	[ "$(sumof $f)" = "$(want $f)" ] || abort "$f checksum mismatch (corrupt download?)"
+done
+progress 0.10
+
+# ------------------------------------------- CPU frequency plugin (before BOOT is overwritten)
+# The APM firmware's DVFS plugin is built into Samsung's kernels: take it
+# from the kernel in BOOT (stock, AOSP or ARMtix 4.4) or from TWRP's
+ui "Looking for the CPU frequency plugin ..."
+DVFS_OK=
+for p in $BOOT $RECOVERY; do
+	[ -b "$p" ] || continue
+	$BB dd if=$p of=$W/part.img bs=1M count=64 2>/dev/null || continue
+	n=$($W/armtix/kfw $W/part.img $DVFS $W/dvfs 2>/dev/null)
+	rm -f $W/part.img
+	i=0
+	while [ $i -lt "${n:-0}" ]; do
+		if [ "$($BB sha256sum < $W/dvfs.$i | cut -d' ' -f1)" = $DVFS_SHA256 ]; then
+			mv $W/dvfs.$i $W/$DVFS
+			DVFS_OK=$p
+			break 2
+		fi
+		i=$((i + 1))
+	done
+done
+rm -f $W/dvfs.*
+if [ -n "$DVFS_OK" ]; then
+	ui "  found in $DVFS_OK"
+else
+	ui "  WARNING: not found (no Samsung kernel in BOOT or RECOVERY) -"
+	ui "  the CPUs will stay at the bootloader's clock speed"
+fi
+
+# ---------------------------------------------------------------- format
+ui " "
+ui "Formatting internal storage (USERDATA) as ext4 ..."
+for m in /sdcard /data/media /data /storage/emulated; do umount -l $m 2>/dev/null; done
+grep -q " /data " /proc/mounts && abort "/data is still mounted (busy)"
+MKE2FS=$(command -v mke2fs || echo /sbin/mke2fs)
+$MKE2FS -F -t ext4 -U $FS_UUID -L armtix $DATA >/dev/null 2>&1 || abort "mke2fs failed"
+mkdir -p $ROOT
+mount -t ext4 $DATA $ROOT || abort "cannot mount new filesystem"
+progress 0.15
+
+# ---------------------------------------------------------------- rootfs
+ui "Installing the root filesystem (a few minutes) ..."
+$BB unzip -p "$ZIP" armtix/rootfs.tar.xz | $BB unxz -c | $BB tar -xpf - -C $ROOT \
+	|| abort "extracting the root filesystem failed"
+[ -x $ROOT/usr/bin/openrc-init ] || abort "root filesystem incomplete"
+ui "Installing the kernel modules ..."
+$BB unzip -p "$ZIP" armtix/mainline.tar.xz | $BB unxz -c | $BB tar -xpf - -C $ROOT \
+	|| abort "extracting the kernel modules failed"
+progress 0.70
+
+ui "Restoring file capabilities ..."
+while read -r path caps; do
+	[ -n "$path" ] && chroot $ROOT /usr/bin/setcap "$caps" "$path" 2>/dev/null
+done < $W/armtix/caps.txt
+
+# ---------------------------------------------------------------- firmware
+ui "Copying the firmware from VENDOR ..."
+mkdir -p $VENMNT $ROOT/vendor $FW/brcm $FW/abox
+[ -n "$DVFS_OK" ] && cp $W/$DVFS $FW/$DVFS
+if [ -b "$VENDOR" ] && { mount -t ext4 -o ro,noload $VENDOR $VENMNT 2>/dev/null ||
+			 mount -o ro $VENDOR $VENMNT 2>/dev/null; }; then
+	V=$VENMNT
+	# copy SRC DST: one file, counted when present
+	n=0; miss=
+	copy() { if [ -f "$V/$1" ]; then cp "$V/$1" "$FW/$2" && n=$((n + 1)); else miss="$miss $1"; fi; }
+
+	copy etc/wifi/bcmdhd_sta.bin_b0 brcm/brcmfmac4361-pcie.bin
+	copy etc/wifi/nvram.txt_r02j_b0 brcm/brcmfmac4361-pcie.txt
+	copy etc/wifi/bcmdhd_clm.blob brcm/brcmfmac4361-pcie.clm_blob
+	[ -f $FW/brcm/brcmfmac4361-pcie.bin ] && ui "  WiFi: ok" || ui "  WARNING: WiFi firmware missing"
+
+	# Bluetooth patch file: semco or murata module, as EFS says
+	mod=semco
+	mkdir -p $EFSMNT
+	if [ -b "$EFS" ] && mount -o ro $EFS $EFSMNT 2>/dev/null; then
+		$BB grep -q '"WIFI":"murata' $EFSMNT/FactoryApp/HwPartInform 2>/dev/null && mod=murata
+		umount $EFSMNT
+	fi
+	copy firmware/bcm4361B0_$mod.hcd brcm/BCM4347B0.hcd
+	[ -f $FW/brcm/BCM4347B0.hcd ] && ui "  Bluetooth: ok ($mod)" || ui "  WARNING: Bluetooth firmware missing"
+
+	for f in calliope_sram calliope_dram calliope_iva; do copy firmware/$f.bin $f.bin; done
+	for f in SoundBoosterParam dsm dsm_tune APBargeIn_AUDIO_SLSI APBiBF_AUDIO_SLSI AP_AUDIO_SLSI; do
+		copy firmware/$f.bin abox/$f.bin
+	done
+	[ -f $FW/calliope_sram.bin ] && ui "  audio: ok" || ui "  WARNING: audio firmware missing - no sound"
+
+	copy firmware/mfc_fw.bin s5p-mfc-v11.fw
+	[ -f $FW/s5p-mfc-v11.fw ] && ui "  video decoder: ok" || ui "  WARNING: video decoder firmware missing"
+
+	ui "  $n files copied"
+	[ -n "$miss" ] && ui "  missing:$miss"
+	umount $VENMNT
+else
+	ui "  WARNING: cannot mount VENDOR - no WiFi, Bluetooth, sound or video decoding."
+	ui "  (Flash a stock/Samsung-based ROM first, then re-run this zip.)"
+fi
+progress 0.80
+
+# ---------------------------------------------------------------- swap
+ui "Creating ${SWAP_MB} MB swap file ..."
+$BB dd if=/dev/zero of=$ROOT/swapfile bs=1M count=$SWAP_MB 2>/dev/null \
+	&& chmod 600 $ROOT/swapfile && $BB mkswap $ROOT/swapfile >/dev/null 2>&1 \
+	|| ui "  WARNING: swap file creation failed"
+progress 0.90
+sync
+umount $ROOT || { sync; umount -l $ROOT; }
+
+# ---------------------------------------------------------------- kernel
+ui "Flashing the mainline kernel to BOOT ..."
+$BB dd if=$W/armtix/boot.img of=$BOOT bs=1M 2>/dev/null || abort "writing BOOT failed"
+sync
+SZ=$($BB wc -c < $W/armtix/boot.img)
+BSUM=$($BB head -c $SZ $BOOT | $BB sha256sum | cut -d' ' -f1)
+[ "$BSUM" = "$(want boot.img)" ] || abort "BOOT verification failed - re-flash!"
+progress 1.0
+
+ui " "
+ui "Done!  Now: Reboot -> System"
+ui "  login: armtix / armtix   (root / armtix)"
+ui "  SSH over USB: 172.16.42.1"
+cleanup
+exit 0

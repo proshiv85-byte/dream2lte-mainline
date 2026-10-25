@@ -209,6 +209,31 @@ cp /vendor/etc/wifi/bcmdhd_clm.blob      brcmfmac4361-pcie.clm_blob
 
 The `_b2` firmware loads but never starts on this module.
 
+## ARMtix TWRP zip
+
+The easiest way to try it: `ARMtix-dream2lte-mainline-*.zip` from the
+[ARMtix releases](https://github.com/proshiv85-byte/armtix-on-s8plus/releases),
+flashed from TWRP. It **erases internal storage** (USERDATA), installs ARMtix
+with this kernel and flashes BOOT. The zip has no Samsung blobs: its
+installer ([`tools/twrp/update-binary`](tools/twrp/update-binary)) copies the
+WiFi, Bluetooth, audio and video decoder firmware from the phone's VENDOR
+partition and takes the CPU frequency plugin out of the Samsung kernel in
+BOOT, or TWRP's kernel in RECOVERY ([`tools/twrp/kfw.c`](tools/twrp/kfw.c)
+finds it through the kernel's built-in firmware table).
+
+[`tools/make-twrp-zip.sh`](tools/make-twrp-zip.sh) builds the zip: the
+kernel and boot image, the modules, and the rootfs streamed from a phone
+running this kernel, sanitized with ARMtix's `rootfs_export.py` (no WiFi
+passwords, SSH keys, logs or personal data; passwords reset to `armtix`;
+Samsung firmware left out). The home directory is ARMtix's `rootfs/overlay`
+with the mainline fixes (sway output name, brightness restore, the dusk
+theme). Needs a checkout of the ARMtix project (`ARTIXP`, default
+`~/work/artixp`):
+
+```sh
+tools/make-twrp-zip.sh [root@172.16.42.1]   # -> out/ARMtix-dream2lte-mainline-<date>.zip
+```
+
 ## Flashing
 
 **Back up your BOOT partition first** (`dd if=/dev/block/sda7 of=...` in TWRP).
@@ -225,11 +250,13 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
 
 - [`rootfs/usbnet`](rootfs/usbnet): the `usbnet` service uses the Samsung
   `android_usb` flow on 4.4 and plain configfs on mainline
-- sway: on mainline the screen is the DRM output `Unknown-1` (simpledrm)
-  instead of `FBDEV-fb0`; [`armtix-sway`](rootfs/armtix-sway) writes the right
-  name to `~/.config/sway/output.conf`, which the sway config includes. It
-  also picks the GPU driver: Mesa `panfrost` on mainline (no
-  `GALLIUM_DRIVER=llvmpipe`, no libhybris), libhybris on 4.4
+- sway: on mainline the screen is the DRM output `DSI-1` instead of
+  `FBDEV-fb0`; [`armtix-sway`](rootfs/armtix-sway) writes the right name to
+  `~/.config/sway/output.conf`. The sway config must include it after its
+  own `set $out FBDEV-fb0` (`include ~/.config/sway/output.conf`), or the
+  scale and the touchscreen mapping go to a screen that doesn't exist (tiny
+  UI, dead touch). `armtix-sway` also picks the GPU driver: Mesa `panfrost`
+  on mainline (no `GALLIUM_DRIVER=llvmpipe`, no libhybris), libhybris on 4.4
 - PulseAudio: the speaker sink has to be optional (`.nofail`) while there is no
   sound driver, otherwise waybar's volume module hangs
 - [`rootfs/10-microsd.rules`](rootfs/10-microsd.rules): udev rule that marks
