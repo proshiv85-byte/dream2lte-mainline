@@ -1,7 +1,7 @@
 From 94ef1dea35e67a9afb85ccfcd4d4c1a43bb43892 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 11:20:29 +0300
-Subject: [PATCH 38/38] WIP: arm64: dts: exynos8895-dream2lte: add the speaker
+Subject: [PATCH 38/41] WIP: arm64: dts: exynos8895-dream2lte: add the speaker
  amplifier
 
 The MAX98506 is at 0x31 on HSI2C11 (USI3), its I2S is UAIF4 on

@@ -1,7 +1,7 @@
 From b641763a4f5fdb0d53e69bc17fe29b339a8646b4 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 11:20:29 +0300
-Subject: [PATCH 35/38] WIP: ASoC: codecs: add a Maxim MAX98506 speaker
+Subject: [PATCH 35/41] WIP: ASoC: codecs: add a Maxim MAX98506 speaker
  amplifier driver
 
 The MAX98506 is a mono class-D amplifier with a boost converter on I2S,

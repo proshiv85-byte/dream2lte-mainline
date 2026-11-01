@@ -1,0 +1,28 @@
+From 6aed1d07a76a0ecc23241c8dfcf7d567a02ef4d9 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sun, 1 Nov 2026 09:47:04 +0200
+Subject: [PATCH 41/41] WIP: arm64: dts: exynos8895-dream2lte: battery charge
+ current up to 2.5 A
+
+The vendor kernel's max_charging_current, reached with 9 V (QC 2.0, USB
+PD) or Type-C 3 A chargers. Plain DCP chargers stay at 2.1 A.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+index db5bce81d..bee9c246f 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -199,7 +199,8 @@ battery: battery {
+ 		compatible = "simple-battery";
+ 		device-chemistry = "lithium-ion";
+ 		charge-full-design-microamp-hours = <3500000>;
+-		constant-charge-current-max-microamp = <2100000>;
++		/* vendor max_charging_current, reached with USB PD or Type-C 3 A */
++		constant-charge-current-max-microamp = <2500000>;
+ 		constant-charge-voltage-max-microvolt = <4350000>;
+ 		charge-term-current-microamp = <150000>;
+ 	};

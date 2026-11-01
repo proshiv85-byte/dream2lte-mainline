@@ -27,7 +27,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | UFS storage | works (HS-G3, 2 lanes), verified reads/writes |
 | USB device mode | works, high-speed (RNDIS/NCM/... via configfs) |
 | Battery fuel gauge | works (MAX77865 FG, `max17042` driver) |
-| Charging | works: computer port 500 mA, charging port (CDP) 1.5 A, wall charger 2.1 A, slower or stopped when the battery is too cold or too hot; no 9 V fast charging yet |
+| Charging | works: computer port 500 mA, charging port (CDP) 1.5 A, wall charger 2.1 A, Quick Charge 2.0 chargers at 9 V (1.65 A in, 2.5 A to the battery), slower or stopped when the battery is too cold or too hot. USB PD (up to 15 W) and Type-C 1.5 / 3 A are in but untested; no Samsung AFC yet |
 | RTC | works (S2MPS17, through the APM firmware) |
 | Reboot, reboot to recovery | works; hardware watchdog available |
 | Power off | wired up, not tested yet |
@@ -69,11 +69,16 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 - MAX77865 charger: charge current by charger type (BC1.2 detection of the
   MUIC), battery temperature limits like the vendor kernel, and the
   charger's watchdog cleared regularly (without it, charging stopped about
-  a minute and a half after boot); USB routing of the MUIC
+  a minute and a half after boot); USB routing of the MUIC; 9 V with Quick
+  Charge 2.0 on D+/D- through the MUIC; input limits from the S2MM005
+  (Type-C current, USB PD contract)
 - video codec: MFC v11 support for `s5p-mfc` (v10 interface; firmware start,
   buffer sizes, keyframe and timestamp fixes, single-buffer NV12 output)
 - ADC: Exynos8895 variant of `exynos_adc`; the battery, charger and USB
   connector thermistors are read through it with `generic-adc-thermal`
+- S2MM005 Type-C controller: role switching and VBUS for host mode; as a
+  sink, the Rp current and the USB PD contract (it asks the firmware for the
+  best PDO up to 15 W / 9 V) as the `s2mm005-source` power supply
 - `stmfts`: FTS8 variant (`st,stmfts8`)
 - ACPM (the APM power-management firmware): loading of the firmware plugins
   the 8895 expects from the kernel, DVFS clocks for `clk-acpm`, mailbox and
@@ -101,7 +106,10 @@ submissions.
   type (`usb_type`), the current limits and the battery temperature state
   (`health`). `echo inhibit-charge > charge_behaviour` stops charging while
   the phone keeps running from USB; writing `constant_charge_current` (µA)
-  lowers the charge current.
+  lowers the charge current. `voltage_now` is the charger's voltage (9 V with
+  Quick Charge); `echo N > /sys/module/max77865_charger/parameters/fast_charge`
+  keeps chargers at 5 V (or `max77865_charger.fast_charge=0` on the command
+  line).
 
 ## Booting
 

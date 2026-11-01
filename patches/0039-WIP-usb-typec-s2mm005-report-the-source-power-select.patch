@@ -1,0 +1,417 @@
+From 57a432c9a4c0f6dba74f20468b7c9a7cf6be492f Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sun, 1 Nov 2026 09:47:04 +0200
+Subject: [PATCH 39/41] WIP: usb: typec: s2mm005: report the source power,
+ select a USB PD contract
+
+As a sink, register a power supply that feeds the MAX77865 charger with
+what the source offers: the Type-C current from the Rp level in the
+function state, or the USB PD contract. The firmware negotiates PD by
+itself; on the source capabilities interrupt, read them and the request
+it sent, and as the vendor kernel does, ask it once per attach for the
+fixed PDO with the most power up to 15 W (here 9 V at most, the lower
+voltage when two give the same power). Also set the Type-C power
+operation mode.
+
+Not tested with a PD charger yet.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/usb/typec/Kconfig   |   8 +-
+ drivers/usb/typec/s2mm005.c | 261 +++++++++++++++++++++++++++++++++++-
+ 2 files changed, 261 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/usb/typec/Kconfig b/drivers/usb/typec/Kconfig
+index 9435d562f..69d9f69a6 100644
+--- a/drivers/usb/typec/Kconfig
++++ b/drivers/usb/typec/Kconfig
+@@ -57,6 +57,7 @@ config TYPEC_ANX7411
+ 	depends on I2C
+ 	depends on USB_ROLE_SWITCH
+ 	depends on POWER_SUPPLY
++	depends on POWER_SUPPLY
+ 	help
+ 	  Say Y or M here if your system has Analogix ANX7411 Type-C DRP Port
+ 	  controller driver.
+@@ -81,6 +82,7 @@ config TYPEC_HD3SS3220
+ 	tristate "TI HD3SS3220 Type-C DRP Port controller driver"
+ 	depends on I2C
+ 	depends on USB_ROLE_SWITCH
++	depends on POWER_SUPPLY
+ 	help
+ 	  Say Y or M here if your system has TI HD3SS3220 Type-C DRP Port
+ 	  controller driver.
+@@ -92,11 +94,13 @@ config TYPEC_S2MM005
+ 	tristate "Samsung S2MM005 Type-C controller driver"
+ 	depends on I2C
+ 	depends on USB_ROLE_SWITCH
++	depends on POWER_SUPPLY
+ 	help
+ 	  Say Y or M here if your system has the Samsung S2MM005 USB Type-C
+ 	  and Power Delivery controller (Galaxy S8 and S8+). The driver
+-	  switches the USB controller between host and device mode and turns
+-	  on VBUS for USB host mode.
++	  switches the USB controller between host and device mode, turns
++	  on VBUS for USB host mode and, as a sink, selects a USB PD contract
++	  and reports the power the source offers to the charger.
+ 
+ 	  If you choose to build this driver as a dynamically linked module, the
+ 	  module will be called s2mm005.ko.
+diff --git a/drivers/usb/typec/s2mm005.c b/drivers/usb/typec/s2mm005.c
+index 509693186..69ef8f7a5 100644
+--- a/drivers/usb/typec/s2mm005.c
++++ b/drivers/usb/typec/s2mm005.c
+@@ -5,10 +5,16 @@
+  * The S2MM005 is a microcontroller with its own firmware (in its flash) that
+  * runs the Type-C state machine and USB PD by itself; the host only reads
+  * the result over I2C. Registers are addressed with 16 bits. This driver
+- * only follows the attach state: it switches the USB controller between
+- * host and device mode and turns on VBUS when a device is attached to the
+- * port. PD negotiation, alternate modes and the firmware update of the
+- * vendor driver are not done.
++ * follows the attach state: it switches the USB controller between host and
++ * device mode and turns on VBUS when a device is attached to the port.
++ *
++ * As a sink it reports the power the charger offers through a power supply
++ * that feeds the battery charger: the Type-C current (Rp) of the source and,
++ * with a USB PD charger, the negotiated voltage and current. The firmware
++ * requests a PDO by itself; like the vendor kernel, the driver then asks it
++ * for the fixed PDO with the most power up to 15 W (9 V at most, the lower
++ * voltage when two give the same power). Alternate modes and the firmware
++ * update of the vendor driver are not done.
+  *
+  * Devices without the Rd pull-down on CC (common on cheap USB-C gadgets)
+  * are not seen by the chip. Writing "source" to the port_type attribute of
+@@ -21,20 +27,37 @@
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
++#include <linux/power_supply.h>
+ #include <linux/property.h>
+ #include <linux/regulator/consumer.h>
++#include <linux/usb/pd.h>
+ #include <linux/usb/role.h>
+ #include <linux/usb/typec.h>
+ 
+ /* write 1: acknowledge the interrupt */
+ #define S2MM005_REG_I2C_CMD		0x0010
+ #define S2MM005_CMD_INT_CLEAR		0x01
++/* 3-byte commands of the vendor driver: request PDO n, then renegotiate */
++#define S2MM005_CMD_PD			0x03
++#define S2MM005_CMD_PD_SET_STATE	0x02
++#define S2MM005_CMD_PD_SELECT_PDO	0x03
+ /* function state, 4 bytes */
+ #define S2MM005_REG_FUNC_STATE		0x0020
+ #define S2MM005_FUNC_PD_STATE		GENMASK(7, 0)
++#define S2MM005_FUNC_RP_LEVEL		GENMASK(28, 27)
++#define S2MM005_RP_DEFAULT		1
++#define S2MM005_RP_1500MA		2
++#define S2MM005_RP_3000MA		3
+ /* interrupt status, read before the acknowledge */
+ #define S2MM005_REG_INT_STATUS		0x0030
+ #define S2MM005_INT_STATUS_LEN		48
++/* 32-bit word of the status with the PD message interrupts */
++#define S2MM005_INT_MSG_WORD		4
++#define S2MM005_INT_MSG_SRC_CAP		BIT(17)
++/* PD request we sent: header word, then the RDO */
++#define S2MM005_REG_TX_REQUEST		0x0240
++/* source capabilities received: header word, then up to 7 PDOs */
++#define S2MM005_REG_RX_SRC_CAP		0x0260
+ 
+ /* PD policy engine states (S2MM005_FUNC_PD_STATE) */
+ #define S2MM005_PD_SRC_FIRST		1
+@@ -43,6 +66,12 @@
+ #define S2MM005_PD_SNK_LAST		25
+ /* where it ends up with a host or charger without PD */
+ #define S2MM005_PD_ERROR_RECOVERY	29
++#define S2MM005_PD_SNK_WAIT_FOR_CAPS	17
++
++/* PDO choice of the vendor kernel (pd_charging_charge_power, max current) */
++#define S2MM005_PD_MAX_MW		15000
++#define S2MM005_PD_MAX_MV		9000
++#define S2MM005_PD_MAX_MA		3000
+ 
+ struct s2mm005 {
+ 	struct device *dev;
+@@ -50,11 +79,18 @@ struct s2mm005 {
+ 	struct usb_role_switch *role_sw;
+ 	struct typec_port *port;
+ 	struct regulator *vbus;
++	struct power_supply *psy;
+ 	/* protects the state below */
+ 	struct mutex lock;
+ 	enum usb_role role;
+ 	enum typec_port_type port_type;
+ 	bool vbus_on;
++	/* sink: Rp level of the source and the PD contract, 0 if none */
++	unsigned int rp_level;
++	unsigned int pd_mv;
++	unsigned int pd_ma;
++	/* PDO we asked the firmware for since the charger was attached */
++	unsigned int pdo_selected;
+ };
+ 
+ static int s2mm005_read(struct s2mm005 *s2mm, u16 reg, void *buf, u16 len)
+@@ -93,6 +129,22 @@ static int s2mm005_write8(struct s2mm005 *s2mm, u16 reg, u8 val)
+ 	return ret == sizeof(buf) ? 0 : -EIO;
+ }
+ 
++static int s2mm005_write(struct s2mm005 *s2mm, u16 reg, const u8 *val, u16 len)
++{
++	u8 buf[8] = { reg >> 8, reg & 0xff };
++	int ret;
++
++	if (len > sizeof(buf) - 2)
++		return -EINVAL;
++	memcpy(&buf[2], val, len);
++
++	ret = i2c_master_send(s2mm->client, buf, len + 2);
++	if (ret < 0)
++		return ret;
++
++	return ret == len + 2 ? 0 : -EIO;
++}
++
+ static void s2mm005_set_vbus(struct s2mm005 *s2mm, bool on)
+ {
+ 	int ret;
+@@ -186,9 +238,187 @@ static void s2mm005_update(struct s2mm005 *s2mm)
+ 
+ 	mutex_lock(&s2mm->lock);
+ 	s2mm005_set_role(s2mm, role);
++	if (s2mm->role == USB_ROLE_DEVICE) {
++		s2mm->rp_level = FIELD_GET(S2MM005_FUNC_RP_LEVEL, func);
++	} else {
++		s2mm->rp_level = 0;
++		s2mm->pd_mv = 0;
++		s2mm->pd_ma = 0;
++		s2mm->pdo_selected = 0;
++	}
+ 	mutex_unlock(&s2mm->lock);
+ }
+ 
++/* power (mW, capped) and current (mA) a fixed PDO is good for, 0 if not usable */
++static unsigned int s2mm005_pdo_power(u32 pdo, unsigned int *mv,
++				      unsigned int *ma)
++{
++	if (pdo_type(pdo) != PDO_TYPE_FIXED)
++		return 0;
++
++	*mv = pdo_fixed_voltage(pdo);
++	if (!*mv || *mv > S2MM005_PD_MAX_MV)
++		return 0;
++
++	*ma = min3(pdo_max_current(pdo), S2MM005_PD_MAX_MA,
++		   S2MM005_PD_MAX_MW * 1000 / *mv);
++
++	return *mv * *ma / 1000;
++}
++
++/* the source sent its capabilities: take the contract, maybe ask for a better one */
++static void s2mm005_src_caps(struct s2mm005 *s2mm)
++{
++	unsigned int cnt, i, pos, best = 0, best_band = 0, best_mv = 0;
++	unsigned int mv, ma, mw;
++	__le32 caps[1 + PDO_MAX_OBJECTS], req[2];
++	u32 pdo[PDO_MAX_OBJECTS];
++	int ret;
++
++	ret = s2mm005_read(s2mm, S2MM005_REG_RX_SRC_CAP, caps, sizeof(caps));
++	if (!ret)
++		ret = s2mm005_read(s2mm, S2MM005_REG_TX_REQUEST, req, sizeof(req));
++	if (ret) {
++		dev_err(s2mm->dev, "failed to read the PD capabilities: %d\n", ret);
++		return;
++	}
++
++	cnt = min(pd_header_cnt(le32_to_cpu(caps[0]) & 0xffff), PDO_MAX_OBJECTS);
++	pos = rdo_index(le32_to_cpu(req[1]));
++
++	/* the vendor kernel compares power in 1 W bands, lower voltage wins */
++	for (i = 0; i < cnt; i++) {
++		pdo[i] = le32_to_cpu(caps[1 + i]);
++		mw = s2mm005_pdo_power(pdo[i], &mv, &ma);
++		dev_dbg(s2mm->dev, "PDO %u: %#010x, %u mW\n", i + 1, pdo[i], mw);
++		if (!mw)
++			continue;
++		if (DIV_ROUND_UP(mw, 1000) > best_band ||
++		    (DIV_ROUND_UP(mw, 1000) == best_band && mv < best_mv)) {
++			best = i + 1;
++			best_band = DIV_ROUND_UP(mw, 1000);
++			best_mv = mv;
++		}
++	}
++
++	mutex_lock(&s2mm->lock);
++	if (s2mm->role != USB_ROLE_DEVICE) {
++		mutex_unlock(&s2mm->lock);
++		return;
++	}
++
++	/* ask once per attach, then go with what the firmware requests */
++	if (best && pos != best && s2mm->pdo_selected != best) {
++		u8 sel[] = { S2MM005_CMD_PD, S2MM005_CMD_PD_SELECT_PDO, best };
++		u8 neg[] = { S2MM005_CMD_PD, S2MM005_CMD_PD_SET_STATE,
++			     S2MM005_PD_SNK_WAIT_FOR_CAPS };
++
++		dev_info(s2mm->dev, "PD: requesting PDO %u (%u mV) instead of %u\n",
++			 best, best_mv, pos);
++		s2mm->pdo_selected = best;
++		ret = s2mm005_write(s2mm, S2MM005_REG_I2C_CMD, sel, sizeof(sel));
++		if (!ret)
++			ret = s2mm005_write(s2mm, S2MM005_REG_I2C_CMD, neg,
++					    sizeof(neg));
++		if (ret)
++			dev_err(s2mm->dev, "failed to select the PDO: %d\n", ret);
++	}
++
++	if (pos >= 1 && pos <= cnt && s2mm005_pdo_power(pdo[pos - 1], &mv, &ma)) {
++		if (mv != s2mm->pd_mv || ma != s2mm->pd_ma)
++			dev_info(s2mm->dev, "PD contract: %u mV, %u mA\n", mv, ma);
++		s2mm->pd_mv = mv;
++		s2mm->pd_ma = ma;
++	} else {
++		s2mm->pd_mv = 0;
++		s2mm->pd_ma = 0;
++	}
++	mutex_unlock(&s2mm->lock);
++}
++
++/* tell the Type-C class and the charger what the source gives */
++static void s2mm005_power_changed(struct s2mm005 *s2mm)
++{
++	enum typec_pwr_opmode mode = TYPEC_PWR_MODE_USB;
++
++	mutex_lock(&s2mm->lock);
++	if (s2mm->pd_mv)
++		mode = TYPEC_PWR_MODE_PD;
++	else if (s2mm->rp_level == S2MM005_RP_3000MA)
++		mode = TYPEC_PWR_MODE_3_0A;
++	else if (s2mm->rp_level == S2MM005_RP_1500MA)
++		mode = TYPEC_PWR_MODE_1_5A;
++	mutex_unlock(&s2mm->lock);
++
++	typec_set_pwr_opmode(s2mm->port, mode);
++	power_supply_changed(s2mm->psy);
++}
++
++static int s2mm005_psy_get_property(struct power_supply *psy,
++				    enum power_supply_property psp,
++				    union power_supply_propval *val)
++{
++	struct s2mm005 *s2mm = power_supply_get_drvdata(psy);
++	bool online;
++	int ma;
++
++	mutex_lock(&s2mm->lock);
++	online = s2mm->role == USB_ROLE_DEVICE && s2mm->rp_level;
++	if (s2mm->pd_mv)
++		ma = s2mm->pd_ma;
++	else if (s2mm->rp_level == S2MM005_RP_3000MA)
++		ma = 3000;
++	else if (s2mm->rp_level == S2MM005_RP_1500MA)
++		ma = 1500;
++	else
++		ma = 500;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		val->intval = online;
++		break;
++	case POWER_SUPPLY_PROP_USB_TYPE:
++		val->intval = !online ? POWER_SUPPLY_USB_TYPE_UNKNOWN :
++			      s2mm->pd_mv ? POWER_SUPPLY_USB_TYPE_PD :
++			      POWER_SUPPLY_USB_TYPE_C;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		val->intval = !online ? 0 :
++			      s2mm->pd_mv ? s2mm->pd_mv * 1000 : 5000000;
++		break;
++	case POWER_SUPPLY_PROP_CURRENT_MAX:
++		val->intval = online ? ma * 1000 : 0;
++		break;
++	default:
++		mutex_unlock(&s2mm->lock);
++		return -EINVAL;
++	}
++	mutex_unlock(&s2mm->lock);
++
++	return 0;
++}
++
++static const enum power_supply_property s2mm005_psy_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_USB_TYPE,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_MAX,
++};
++
++static const struct power_supply_desc s2mm005_psy_desc = {
++	.name		= "s2mm005-source",
++	.type		= POWER_SUPPLY_TYPE_USB,
++	.usb_types	= BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
++			  BIT(POWER_SUPPLY_USB_TYPE_C) |
++			  BIT(POWER_SUPPLY_USB_TYPE_PD),
++	.properties	= s2mm005_psy_props,
++	.num_properties	= ARRAY_SIZE(s2mm005_psy_props),
++	.get_property	= s2mm005_psy_get_property,
++};
++
++/* the battery charger of the S8/S8+ (MAX77865) takes its input limits from us */
++static char *s2mm005_supplied_to[] = { "max77865-charger" };
++
+ static int s2mm005_port_type_set(struct typec_port *port,
+ 				 enum typec_port_type type)
+ {
+@@ -216,14 +446,21 @@ static const struct typec_operations s2mm005_ops = {
+ static irqreturn_t s2mm005_irq(int irq, void *data)
+ {
+ 	struct s2mm005 *s2mm = data;
+-	u8 status[S2MM005_INT_STATUS_LEN];
++	__le32 status[S2MM005_INT_STATUS_LEN / 4];
++	int ret;
+ 
+ 	s2mm005_update(s2mm);
+ 
+ 	/* read the interrupt status, then acknowledge it */
+-	s2mm005_read(s2mm, S2MM005_REG_INT_STATUS, status, sizeof(status));
++	ret = s2mm005_read(s2mm, S2MM005_REG_INT_STATUS, status, sizeof(status));
+ 	s2mm005_write8(s2mm, S2MM005_REG_I2C_CMD, S2MM005_CMD_INT_CLEAR);
+ 
++	if (!ret && (le32_to_cpu(status[S2MM005_INT_MSG_WORD]) &
++		     S2MM005_INT_MSG_SRC_CAP))
++		s2mm005_src_caps(s2mm);
++
++	s2mm005_power_changed(s2mm);
++
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -248,6 +485,7 @@ static int s2mm005_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+ 	struct typec_capability cap = { };
++	struct power_supply_config psy_cfg = { };
+ 	struct fwnode_handle *connector;
+ 	struct s2mm005 *s2mm;
+ 	__le32 raw;
+@@ -313,8 +551,19 @@ static int s2mm005_probe(struct i2c_client *client)
+ 	if (ret)
+ 		return ret;
+ 
++	psy_cfg.drv_data = s2mm;
++	psy_cfg.supplied_to = s2mm005_supplied_to;
++	psy_cfg.num_supplicants = ARRAY_SIZE(s2mm005_supplied_to);
++	s2mm->psy = devm_power_supply_register(dev, &s2mm005_psy_desc, &psy_cfg);
++	if (IS_ERR(s2mm->psy))
++		return dev_err_probe(dev, PTR_ERR(s2mm->psy),
++				     "failed to register the power supply\n");
++
+ 	/* the chip may already be attached: take its state before the IRQ */
+ 	s2mm005_update(s2mm);
++	if (s2mm->role == USB_ROLE_DEVICE)
++		s2mm005_src_caps(s2mm);
++	s2mm005_power_changed(s2mm);
+ 
+ 	ret = devm_request_threaded_irq(dev, client->irq, NULL, s2mm005_irq,
+ 					IRQF_ONESHOT, dev_name(dev), s2mm);
