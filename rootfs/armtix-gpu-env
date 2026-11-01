@@ -1,0 +1,38 @@
+# GPU environment for programs on the phone, sourced (not run) by
+# armtix-sway for the sway session and by /etc/profile.d/armtix-session.sh
+# for logins outside it (SSH, text consoles). Install to
+# /usr/local/lib/armtix/gpu-env.
+#
+# EGL apps render on the GPU. Mainline kernel: Mesa's panfrost driver. 4.4
+# kernel: libhybris first, Mesa (llvmpipe) for what it doesn't do (GBM,
+# X11/Xwayland, desktop OpenGL apps: mesa-run <app>); skip Mesa's Zink
+# attempt, there's no Vulkan driver.
+egl=/usr/share/glvnd/egl_vendor.d
+if [ "$(basename "$(readlink /sys/class/drm/renderD128/device/driver 2>/dev/null)")" = panfrost ]; then
+	[ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] &&
+		export __EGL_VENDOR_LIBRARY_FILENAMES=$egl/50_mesa.json
+	# panfrost offers OpenGL 3.1 on the G71, and programs asking for 3.3
+	# don't start. Of what 3.2/3.3 add it only lacks geometry shaders and
+	# timer queries, so report 3.3 (core and compatibility, GLSL 3.30):
+	# programs that use those get an error when they do. Set to 3.1 / 140
+	# for an app to get the real versions.
+	export MESA_GL_VERSION_OVERRIDE=${MESA_GL_VERSION_OVERRIDE:-3.3}
+	export MESA_GLSL_VERSION_OVERRIDE=${MESA_GLSL_VERSION_OVERRIDE:-330}
+	# Mesa with the Mali-G71 derivative fix (tools/mesa-g71): rounded
+	# corners in Firefox/GTK4 are drawn as half transparent blocks without it
+	m=/opt/mesa-g71
+	if [ -f $m/share/glvnd/egl_vendor.d/50_mesa.json ]; then
+		case ":$LD_LIBRARY_PATH:" in
+		*":$m/lib:"*) ;;
+		*) export LD_LIBRARY_PATH=$m/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} ;;
+		esac
+		export GBM_BACKENDS_PATH=$m/lib/gbm
+		export __EGL_VENDOR_LIBRARY_FILENAMES=$m/share/glvnd/egl_vendor.d/50_mesa.json
+	fi
+	unset m
+else
+	export GALLIUM_DRIVER=llvmpipe
+	[ -z "$WLR_RENDERER" ] && [ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] &&
+		export __EGL_VENDOR_LIBRARY_FILENAMES=$egl/60_libhybris.json:$egl/50_mesa.json
+fi
+unset egl

@@ -22,25 +22,12 @@ export WLR_LIBINPUT_NO_DEVICES=1
 export XDG_SESSION_TYPE=wayland XDG_SESSION_DESKTOP=sway XDG_CURRENT_DESKTOP=sway
 export MOZ_ENABLE_WAYLAND=1 QT_QPA_PLATFORM="wayland;xcb" SDL_VIDEODRIVER=wayland
 export GDK_BACKEND=wayland,x11 _JAVA_AWT_WM_NONREPARENTING=1
-# EGL apps render on the GPU: libhybris first, Mesa (llvmpipe) for what it
-# doesn't do (GBM, X11/Xwayland, desktop OpenGL apps: mesa-run <app>). Skip
-# Mesa's Zink attempt, there's no Vulkan driver.
-egl=/usr/share/glvnd/egl_vendor.d
-if [ "$(basename "$(readlink /sys/class/drm/renderD128/device/driver 2>/dev/null)")" = panfrost ]; then
-	# mainline kernel: the Mali GPU runs on Mesa's panfrost driver
-	[ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] &&
-		export __EGL_VENDOR_LIBRARY_FILENAMES=$egl/50_mesa.json
-	# Mesa with the Mali-G71 derivative fix (tools/mesa-g71): rounded
-	# corners in Firefox/GTK4 are drawn as half transparent blocks without it
-	m=/opt/mesa-g71
-	if [ -f $m/share/glvnd/egl_vendor.d/50_mesa.json ]; then
-		export LD_LIBRARY_PATH=$m/lib:$LD_LIBRARY_PATH GBM_BACKENDS_PATH=$m/lib/gbm
-		export __EGL_VENDOR_LIBRARY_FILENAMES=$m/share/glvnd/egl_vendor.d/50_mesa.json
-	fi
+# GPU: panfrost or libhybris, see /usr/local/lib/armtix/gpu-env (also read
+# by /etc/profile.d/armtix-session.sh for SSH and console logins)
+if [ -f /usr/local/lib/armtix/gpu-env ]; then
+	. /usr/local/lib/armtix/gpu-env
 else
-	export GALLIUM_DRIVER=llvmpipe
-	[ -z "$WLR_RENDERER" ] && [ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] &&
-		export __EGL_VENDOR_LIBRARY_FILENAMES=$egl/60_libhybris.json:$egl/50_mesa.json
+	echo "armtix-sway: /usr/local/lib/armtix/gpu-env missing, no GPU setup" >&2
 fi
 
 mkdir -p ~/.local/state

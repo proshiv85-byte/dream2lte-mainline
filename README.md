@@ -18,7 +18,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 |---|---|
 | CPUs (8 cores), RAM (3.5 GB usable) | works, idle cores are powered down |
 | CPU frequency scaling | works: A53 455–1690 MHz, Mongoose 741–2314 MHz, via the APM firmware (needs the DVFS plugin, see below) |
-| GPU (Mali-G71 MP20) | works: `panfrost` + Mesa (OpenGL ES / OpenGL), DVFS 260–546 MHz, sway renders on it |
+| GPU (Mali-G71 MP20) | works: `panfrost` + Mesa (OpenGL ES 3.1, OpenGL 3.1, reported as 3.3 for apps, see Rootfs notes), DVFS 260–546 MHz, sway renders on it |
 | WiFi (BCM4361) | works: scan and connect, 2.4 + 5 GHz, via `brcmfmac` (needs the Samsung firmware, see below) |
 | Thermal | works: CPU, GPU and ISP sensors, CPUs throttle at 80 °C (big) / 90 °C (little), shutdown at 115 °C; battery, charger and USB connector thermistors |
 | microSD | reads work at reduced speed (~3.3 MB/s, card clock capped at 7 MHz for now) |
@@ -231,7 +231,7 @@ address bar as half transparent blocks (GTK4 likely too).
 [`tools/mesa-g71`](tools/mesa-g71) patches Mesa to return zero derivatives on
 the G71 (correct shapes, hard edges; plus a fix for the lane constant of the
 G72/G31 path), cross-builds a panfrost-only Mesa and installs it to
-`/opt/mesa-g71`, which `armtix-sway` uses when present. Nothing in `/usr` is
+`/opt/mesa-g71`, which [`gpu-env`](rootfs/armtix-gpu-env) uses when present. Nothing in `/usr` is
 replaced, so pacman updates don't break it; rebuild after a Mesa update:
 
 ```sh
@@ -304,8 +304,26 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
   `~/.config/sway/output.conf`. The sway config must include it after its
   own `set $out FBDEV-fb0` (`include ~/.config/sway/output.conf`), or the
   scale and the touchscreen mapping go to a screen that doesn't exist (tiny
-  UI, dead touch). `armtix-sway` also picks the GPU driver: Mesa `panfrost`
-  on mainline (no `GALLIUM_DRIVER=llvmpipe`, no libhybris), libhybris on 4.4
+  UI, dead touch)
+- GPU environment: [`rootfs/armtix-gpu-env`](rootfs/armtix-gpu-env)
+  (`/usr/local/lib/armtix/gpu-env`, sourced by `armtix-sway`) picks the
+  driver: Mesa `panfrost` on mainline (no `GALLIUM_DRIVER=llvmpipe`, no
+  libhybris), libhybris on 4.4
+- OpenGL 3.3: panfrost reports OpenGL 3.1 on the G71, and programs that ask
+  for 3.3 fail to create a context. Of what 3.2 and 3.3 add it only lacks
+  geometry shaders and timer queries, so `gpu-env` sets
+  `MESA_GL_VERSION_OVERRIDE=3.3` and `MESA_GLSL_VERSION_OVERRIDE=330` (core
+  and compatibility profile). Programs using geometry shaders get an error
+  when they compile one. Set the two variables to `3.1` / `140` for an app
+  to see the real versions
+- graphical programs from SSH or a text console:
+  [`rootfs/armtix-session.sh`](rootfs/armtix-session.sh) in
+  `/etc/profile.d` gives login shells the running sway session's
+  `WAYLAND_DISPLAY`, `DISPLAY` (Xwayland), `SWAYSOCK` and the GPU
+  environment, so programs open on the phone screen without setup (root
+  gets the socket's full path). Without it, GLFW programs fail with
+  "Failed to detect any supported platform". One-shot `ssh phone command`
+  doesn't read login scripts: `ssh -t phone 'bash -lc command'`
 - PulseAudio: sinks that may be missing (the 4.4 speaker sink, cards that
   aren't plugged in) have to be optional (`.nofail`), otherwise waybar's
   volume module hangs
