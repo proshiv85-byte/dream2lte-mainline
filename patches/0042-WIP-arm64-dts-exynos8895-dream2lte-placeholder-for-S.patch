@@ -1,0 +1,33 @@
+From 96d776d3351a36d2f2038c568bfed7e9e0b6f743 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sun, 1 Nov 2026 10:18:24 +0200
+Subject: [PATCH 42/42] WIP: arm64: dts: exynos8895-dream2lte: placeholder for
+ S-Boot's boot mode
+
+The boot shim copies S-Boot's androidboot.mode ("charger" when a cable
+powered the phone on) into /chosen/dream2lte,sboot-mode, so the
+initramfs can charge without booting the system.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+index bee9c246f..dca214cf5 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -27,6 +27,13 @@ chosen {
+ 		#size-cells = <1>;
+ 		ranges;
+ 
++		/*
++		 * Filled in by the boot shim with S-Boot's androidboot.mode
++		 * ("charger" when plugging in a cable powered the phone on),
++		 * or "none". 32 characters of room.
++		 */
++		dream2lte,sboot-mode = "@D2L-SBOOT-MODE@@@@@@@@@@@@@@@@@";
++
+ 		framebuffer: framebuffer@cc000000 {
+ 			compatible = "simple-framebuffer";
+ 			reg = <0 0xcc000000 (1440 * 2960 * 4)>;

@@ -1,7 +1,7 @@
 From dd99252d0036f6ad6eaebe530d953484d31a468c Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 11:20:29 +0300
-Subject: [PATCH 36/41] WIP: ASoC: samsung: exynos8895-abox: play on UAIF0 or
+Subject: [PATCH 36/42] WIP: ASoC: samsung: exynos8895-abox: play on UAIF0 or
  UAIF4
 
 UAIF4 feeds the loudspeaker amplifier. Clock and format it like UAIF0

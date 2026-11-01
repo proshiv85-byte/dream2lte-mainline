@@ -25,6 +25,8 @@ fi
 	${CROSS}gcc -Os -static -nostdlib -fno-stack-protector -o tools/rbt tools/rbt.c
 [ tools/devmem -nt tools/devmem.c ] ||
 	${CROSS}gcc -O2 -static -o tools/devmem tools/devmem.c
+[ tools/chgmode -nt tools/chgmode.c ] ||
+	${CROSS}gcc -O2 -static -Wall -o tools/chgmode tools/chgmode.c
 
 V=${INITRAMFS:-boot}
 mkdir -p build
@@ -40,6 +42,7 @@ mkdir -p build
 	echo "file /bin/busybox $(realpath "$BUSYBOX") 755 0 0"
 	echo "file /bin/rbt $TOP/tools/rbt 755 0 0"
 	echo "file /bin/devmem $TOP/tools/devmem 755 0 0"
+	echo "file /bin/chgmode $TOP/tools/chgmode 755 0 0"
 	echo "file /init $TOP/initramfs/$V/init 755 0 0"
 } > initramfs/list.txt.new
 cmp -s initramfs/list.txt.new initramfs/list.txt || mv initramfs/list.txt.new initramfs/list.txt

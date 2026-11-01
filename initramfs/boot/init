@@ -17,6 +17,17 @@ for arg in $(cat /proc/cmdline); do
 	esac
 done
 
+# S-Boot's boot mode, copied into the DTB by the boot shim: "charger" when
+# plugging in a cable powered the phone on. Charge without booting then,
+# until the power key is held (boot) or the cable is unplugged (power off).
+mode=$(tr '\0' '\n' < /proc/device-tree/chosen/dream2lte,sboot-mode 2>/dev/null | head -n 1)
+log "S-Boot boot mode: ${mode:-unknown}"
+if [ "$mode" = charger ] && [ -x /bin/chgmode ]; then
+	for c in /sys/class/vtconsole/vtcon*/bind; do echo 0 > "$c"; done 2>/dev/null
+	/bin/chgmode
+	for c in /sys/class/vtconsole/vtcon*/bind; do echo 1 > "$c"; done 2>/dev/null
+fi
+
 for i in $(seq 1 100); do
 	[ -b "$root" ] && break
 	sleep 0.1

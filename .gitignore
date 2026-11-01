@@ -6,6 +6,7 @@
 /initramfs/list.txt
 /tools/rbt
 /tools/devmem
+/tools/chgmode
 /tools/i2c
 /tools/gpioget
 /shim/shim.elf

@@ -31,7 +31,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | Charging | works: computer port 500 mA, charging port (CDP) 1.5 A, wall charger 2.1 A, Quick Charge 2.0 chargers at 9 V (1.65 A in, 2.5 A to the battery), slower or stopped when the battery is too cold or too hot. USB PD (up to 15 W) and Type-C 1.5 / 3 A are in but untested; no Samsung AFC yet |
 | RTC | works (S2MPS17, through the APM firmware) |
 | Reboot, reboot to recovery | works; hardware watchdog available |
-| Power off | wired up, not tested yet |
+| Power off | works. Plugging a charger into the powered-off phone starts off-mode charging (battery screen, hold power to boot, unplug to power off), see Booting |
 | Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; in Firefox for H.264/HEVC with the patched libavcodec below (1080p at ~4% CPU); VP9 in Firefox still in software |
 | Bluetooth | works (BCM4361 over UART1, BlueZ): pairing, A2DP headphones through PulseAudio. Needs the vendor patch file, see Rootfs notes |
 | USB host (OTG) | works through the USB-C controller (S2MM005) with 5 V from the charger (up to 1.5 A). Devices without the CC resistor (cheap USB-C gadgets) aren't detected, also not by the Samsung kernel: `echo source > /sys/class/typec/port0/port_type` forces host mode, `dual` goes back (do that before plugging in a PC or charger) |
@@ -146,10 +146,21 @@ boot image carries a tiny shim ([`shim/shim.S`](shim/shim.S)) that
 1. enables the display controller's trigger so the framebuffer keeps refreshing,
 2. copies the DTB and the Image to aligned addresses and jumps to the kernel,
 3. with `DEV_RECOVERY=1`, presets the Samsung reboot reason to "recovery" so a
-   crash or reset of the new kernel lands in TWRP instead of boot looping.
+   crash or reset of the new kernel lands in TWRP instead of boot looping,
+4. copies S-Boot's boot mode (`androidboot.mode=` in the bootargs of the DTB
+   S-Boot passes) into `/chosen/dream2lte,sboot-mode` of our DTB, or `none`.
 
-The DTB passed by S-Boot is ignored, the kernel command line is built in.
-A small initramfs mounts `/dev/sda27` and switches to `/sbin/init`.
+Otherwise the DTB passed by S-Boot is ignored, the kernel command line is
+built in. A small initramfs mounts `/dev/sda27` and switches to `/sbin/init`.
+
+**Off-mode charging:** plugging a charger into the powered-off phone powers
+it on with the boot mode `charger`. The initramfs then runs
+[`tools/chgmode.c`](tools/chgmode.c) instead of booting: it shows the battery
+level for 5 s and then turns the screen black (the panel is AMOLED; in the
+initramfs the framebuffer is simpledrm, which can't put the panel to sleep),
+a short press of the power key shows it again, holding the power key for
+1.5 s boots the system, and unplugging the charger powers the phone off. The
+kernel's charger driver charges meanwhile (QC 2.0 included).
 
 ## Building
 

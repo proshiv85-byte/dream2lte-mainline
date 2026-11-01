@@ -1,7 +1,7 @@
 From 66bce109dafff6ae101cb502f36c7d207693981c Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 11:20:29 +0300
-Subject: [PATCH 37/41] WIP: ASoC: samsung: dream2lte: add the loudspeaker
+Subject: [PATCH 37/42] WIP: ASoC: samsung: dream2lte: add the loudspeaker
 
 Add the MAX98506 on UAIF4 as a second codec of the playback link and
 an "Output" control (Headphones, Speaker) that switches the ABOX route

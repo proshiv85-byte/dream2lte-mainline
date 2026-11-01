@@ -14,7 +14,7 @@ already works.
 | 3 | **Vibration motor** | Haptic feedback, notifications. | S–M | Likely the MAX77865 haptic block (PWM) or a GPIO-driven motor; check the vendor DT. |
 | 4 | **Notification LED** | Small, easy win. | S | Check the vendor DT for which chip drives it. |
 | 5 | ~~Bluetooth (BCM4361)~~ | **Done.** `hci_bcm` on UART1 with the vendor `.hcd` patch, real address from EFS; A2DP headphones work. | — | Follow-ups: a waybar/GUI for pairing, runtime PM through the wake GPIOs. |
-| 6 | **Power off** | Wired up but never tested. | S | Just test `poweroff` and check it really cuts power (no drain). |
+| 6 | ~~Power off~~ | **Done.** `poweroff` works; a charger plugged into the powered-off phone starts off-mode charging (battery screen, hold power to boot). | — | Follow-up: put the panel to sleep in off-mode charging instead of showing black (needs exynosdrm in the initramfs). |
 | 7 | **Suspend (s2idle, then deep sleep)** | The big one for battery life. | L–XL | Needs the screen off (#1), power domains (#9), wakeup sources (power key, RTC, USB), and the APM firmware's sleep path. s2idle first, it doesn't need the firmware. |
 
 ## Speed and power
@@ -50,6 +50,5 @@ already works.
 
 ## Suggested order
 
-6 → 5 → 7. Brightness/screen-off and the charger are done; power off is a
-quick check, Bluetooth is the next useful feature, and suspend is the
-biggest battery win.
+7 next: brightness/screen-off, the charger, Bluetooth and power off are done,
+and suspend is the biggest battery win.
