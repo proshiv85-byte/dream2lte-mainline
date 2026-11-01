@@ -10,7 +10,7 @@ already works.
 | # | Item | Why it matters | Effort | Notes |
 |---|---|---|---|---|
 | 1 | ~~Display brightness and screen off~~ | **Done.** Brightness through the panel's AOR on the bootloader's gamma; the panel sleeps when the screen is off. | — | Follow-up: calibrated gamma curves (vendor computes them from the panel's MTP) for the full brightness range. |
-| 2 | ~~Charger driver (MAX77865)~~ | **Done.** Charger type detection, 0.5 / 1.5 / 2.1 A, battery temperature limits, charger watchdog. | — | Follow-ups: QC 2.0 9 V done; USB PD and Type-C current in but untested with a PD charger; Samsung AFC (serial protocol on D-, through the MUIC), interrupts instead of the 5 s poll, keeping the charger watchdog fed during suspend. |
+| 2 | ~~Charger driver (MAX77865)~~ | **Done.** Charger type detection, 0.5 / 1.5 / 2.1 A, QC 2.0 at 9 V (2.5 A), USB PD / Type-C current (untested), battery temperature limits, charger watchdog. | — | Follow-ups: QC 2.0 9 V done; USB PD and Type-C current in but untested with a PD charger; Samsung AFC (serial protocol on D-, through the MUIC), interrupts instead of the 5 s poll, keeping the charger watchdog fed during suspend. |
 | 3 | **Vibration motor** | Haptic feedback, notifications. | S–M | Likely the MAX77865 haptic block (PWM) or a GPIO-driven motor; check the vendor DT. |
 | 4 | **Notification LED** | Small, easy win. | S | Check the vendor DT for which chip drives it. |
 | 5 | ~~Bluetooth (BCM4361)~~ | **Done.** `hci_bcm` on UART1 with the vendor `.hcd` patch, real address from EFS; A2DP headphones work. | — | Follow-ups: a waybar/GUI for pairing, runtime PM through the wake GPIOs. |

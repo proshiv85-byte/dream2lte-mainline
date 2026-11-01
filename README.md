@@ -8,7 +8,8 @@ made for the [ARMtix (Artix Linux) port](https://github.com/proshiv85-byte/armti
 > hardware is not supported yet (see below). Expect breakage, and keep a working
 > boot image and TWRP at hand. Nothing here is upstream yet.
 
-The kernel is current mainline (7.3-rc) plus the patches in [`patches/`](patches/).
+The kernel is current mainline (7.3 and the start of the 7.4 merge window, the
+commit in [`patches/BASE`](patches/BASE)) plus the patches in [`patches/`](patches/).
 It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 
 ## Status
@@ -33,7 +34,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | Power off | wired up, not tested yet |
 | Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; in Firefox for H.264/HEVC with the patched libavcodec below (1080p at ~4% CPU); VP9 in Firefox still in software |
 | Bluetooth | works (BCM4361 over UART1, BlueZ): pairing, A2DP headphones through PulseAudio. Needs the vendor patch file, see Rootfs notes |
-| USB host (OTG) | works through the USB-C controller (S2MM005) with 5 V from the charger. Devices without the CC resistor (cheap USB-C gadgets) aren't detected, also not by the Samsung kernel: `echo source > /sys/class/typec/port0/port_type` forces host mode, `dual` goes back (do that before plugging in a PC or charger) |
+| USB host (OTG) | works through the USB-C controller (S2MM005) with 5 V from the charger (up to 1.5 A). Devices without the CC resistor (cheap USB-C gadgets) aren't detected, also not by the Samsung kernel: `echo source > /sys/class/typec/port0/port_type` forces host mode, `dual` goes back (do that before plugging in a PC or charger) |
 | Audio | headphone jack playback works (ABOX with the vendor Calliope firmware, CS47L93 codec), 48 kHz; needs the firmware, see Rootfs notes. Loudspeaker in progress (silent, [notes](notes/loudspeaker.md)), earpiece, mics and jack detection not yet. USB audio devices work |
 | Cameras, modem, USB 3, suspend | not supported yet |
 
@@ -44,21 +45,29 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 - UFS: Exynos8895 host and PHY support for `ufs-exynos` / `phy-samsung-ufs`
   (+ a `get_upmcrs` hook in the UFS core: this host reports power mode
   results in its UniPro block)
-- USB: Exynos8895 USB DRD PHY (`phy-exynos5-usbdrd`) and DWC3 glue
+- USB: Exynos8895 USB DRD PHY (`phy-exynos5-usbdrd`) and DWC3 glue; DWC3
+  switches between device and host mode (default: device) from the Type-C
+  controller
+- S2MM005 USB-C controller (new driver, `s2mm005`): its firmware runs
+  Type-C and USB PD; the driver follows the attach state for the USB role
+  and VBUS, and as a sink reports the Rp current and the USB PD contract (it
+  asks the firmware for the best PDO up to 15 W / 9 V, like the vendor
+  kernel) as the `s2mm005-source` power supply for the charger
 - PMIC access: the APM firmware drives the SPEEDY bus to the PMIC itself
   (voltage changes), so PMIC registers are read and written through it
   (`i2c-exynos-acpm-pmic`), as on the vendor kernel. Accessing SPEEDY
   directly from Linux while the firmware does DVFS hangs the phone. The
   direct SPEEDY driver (`i2c-exynos-speedy`) is still in the patches but
   unused.
-- S2MPS17 PMIC: touchscreen regulators and RTC
+- S2MPS17 PMIC: touchscreen and audio codec regulators (LDO32, LDO33) and RTC
 - display: Exynos8895 DECON-F driver for `exynosdrm`. It keeps the display
   path set up by the bootloader (command mode panel, DSC, DSI) and only
   flips buffers; with the name `exynos`, Mesa scans out panfrost-rendered
   buffers directly. Panel commands go through the DSI host: the panel
   sleeps while the screen is off, and brightness sets how long each frame
   is lit (AOR), on the bootloader's gamma curve. No render node on this SoC
-  (Mesa would leak scanout buffers through it)
+  (Mesa would leak scanout buffers through it). `exynosdrm` also accepts
+  devices without a SysMMU when `EXYNOS_IOMMU` is set (enabled for ABOX)
 - CPU idle: PSCI core power-down; `exynos8895-cpupm` sets the core's PMU
   power configuration around it (and disarms the cluster power-down the
   bootloader leaves enabled, which loses the L2 contents)
@@ -69,16 +78,26 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 - MAX77865 charger: charge current by charger type (BC1.2 detection of the
   MUIC), battery temperature limits like the vendor kernel, and the
   charger's watchdog cleared regularly (without it, charging stopped about
-  a minute and a half after boot); USB routing of the MUIC; 9 V with Quick
-  Charge 2.0 on D+/D- through the MUIC; input limits from the S2MM005
-  (Type-C current, USB PD contract)
+  a minute and a half after boot); USB routing of the MUIC; input limits
+  from the S2MM005 (Type-C current, USB PD contract); 9 V with Quick
+  Charge 2.0 on D+/D- through the MUIC; the 5 V boost for USB host mode as
+  a regulator
 - video codec: MFC v11 support for `s5p-mfc` (v10 interface; firmware start,
-  buffer sizes, keyframe and timestamp fixes, single-buffer NV12 output)
+  buffer sizes, keyframe and timestamp fixes, single-buffer NV12 output),
+  and fixes for players like Firefox: more capture buffers, restart after a
+  drain (`V4L2_DEC_CMD_START`) for loops and seeks
+- audio: an ABOX driver (`snd-soc-exynos8895-abox`) that boots the vendor
+  Calliope firmware on the ABOX Cortex-A7, talks its IPC protocol and plays
+  through RDMA0 and the mixer to UAIF0 (or UAIF4); the dream2lte sound card
+  with the CS47L93 codec on SPI (headphones on HPOUT2, FLL1 from a 26 MHz
+  MCLK1 out of the SoC's XCLKOUT, hence the Exynos8895 variant of
+  `exynos-clkout`); ABOX, its SysMMU and power domain in the DT. A MAX98506
+  loudspeaker amplifier driver and the speaker route are in, but the speaker
+  stays silent ([notes](notes/loudspeaker.md))
+- Bluetooth: BCM4361 on UART1 for `hci_bcm`/`btbcm` (its placeholder
+  address is marked unconfigured, so userspace sets the real one)
 - ADC: Exynos8895 variant of `exynos_adc`; the battery, charger and USB
   connector thermistors are read through it with `generic-adc-thermal`
-- S2MM005 Type-C controller: role switching and VBUS for host mode; as a
-  sink, the Rp current and the USB PD contract (it asks the firmware for the
-  best PDO up to 15 W / 9 V) as the `s2mm005-source` power supply
 - `stmfts`: FTS8 variant (`st,stmfts8`)
 - ACPM (the APM power-management firmware): loading of the firmware plugins
   the 8895 expects from the kernel, DVFS clocks for `clk-acpm`, mailbox and
@@ -86,7 +105,8 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 - PCIe: Exynos8895 host driver (`pcie-exynos8895`, DesignWare based) for the
   WiFi chip; its outbound window is only 4 MiB, so the chip's 4 MiB RAM BAR
   is clipped and the register BAR moved above it on the bus
-- `brcmfmac`: BCM4361 support (PCIe, Samsung's firmware)
+- `brcmfmac`: BCM4361 support (PCIe, Samsung's firmware); BSS max idle is
+  turned off, the firmware crashed while joining some Wi-Fi 7 routers with it
 - GPU: Mali-G71 node for `panfrost`, clocked through ACPM like the CPUs
 - `exynos8895_tmu`: temperature sensors of the 8895 TMU, thermal zones with
   cpufreq cooling
@@ -110,6 +130,12 @@ submissions.
   Quick Charge); `echo N > /sys/module/max77865_charger/parameters/fast_charge`
   keeps chargers at 5 V (or `max77865_charger.fast_charge=0` on the command
   line).
+- USB-C: `/sys/class/power_supply/s2mm005-source/` shows what a USB-C
+  charger offers (`usb_type` C or PD, `voltage_now`, `current_max`), and
+  `/sys/class/typec/port0/power_operation_mode` the Type-C current
+- audio: the `Output` mixer control picks `Headphones` or `Speaker` (`amixer
+  sset Output Headphones`); [`rootfs/armtix-audio`](rootfs/armtix-audio)
+  sets the headphone route at boot
 
 ## Booting
 
@@ -248,7 +274,11 @@ tools/make-twrp-zip.sh [root@172.16.42.1]   # -> out/ARMtix-dream2lte-mainline-<
 
 - from TWRP: `tools/flash-twrp.sh` (adb)
 - from a running Linux on the phone: `tools/flash-ssh.sh` (also installs the
-  modules)
+  modules and the CPU frequency plugin, reboots and waits for ssh).
+  `PHONE=<ip>` reaches it another way than USB (e.g. WiFi, when the phone is
+  on a charger), `NOREBOOT=1` only writes BOOT. It builds the shim with
+  `DEV_RECOVERY=1` unless told otherwise, so a crash or reset of the new
+  kernel lands in TWRP; with `DEV_RECOVERY=0` resets reboot normally
 
 To go back, write your old boot image to `sda7` from TWRP.
 
@@ -265,8 +295,9 @@ ARMtix was made for the 4.4 kernel. To run the same rootfs on both kernels:
   scale and the touchscreen mapping go to a screen that doesn't exist (tiny
   UI, dead touch). `armtix-sway` also picks the GPU driver: Mesa `panfrost`
   on mainline (no `GALLIUM_DRIVER=llvmpipe`, no libhybris), libhybris on 4.4
-- PulseAudio: the speaker sink has to be optional (`.nofail`) while there is no
-  sound driver, otherwise waybar's volume module hangs
+- PulseAudio: sinks that may be missing (the 4.4 speaker sink, cards that
+  aren't plugged in) have to be optional (`.nofail`), otherwise waybar's
+  volume module hangs
 - [`rootfs/10-microsd.rules`](rootfs/10-microsd.rules): udev rule that marks
   the microSD card read-only (my card's data must not be touched; drop that
   line if you want to write to yours) and keeps requests short enough for the
