@@ -35,7 +35,7 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; in Firefox for H.264/HEVC with the patched libavcodec below (1080p at ~4% CPU); VP9 in Firefox still in software |
 | Bluetooth | works (BCM4361 over UART1, BlueZ): pairing, A2DP headphones through PulseAudio. Needs the vendor patch file, see Rootfs notes |
 | USB host (OTG) | works through the USB-C controller (S2MM005) with 5 V from the charger (up to 1.5 A). Devices without the CC resistor (cheap USB-C gadgets) aren't detected, also not by the Samsung kernel: `echo source > /sys/class/typec/port0/port_type` forces host mode, `dual` goes back (do that before plugging in a PC or charger) |
-| Audio | headphone jack playback works (ABOX with the vendor Calliope firmware, CS47L93 codec), 48 kHz; needs the firmware, see Rootfs notes. Loudspeaker in progress (silent, [notes](notes/loudspeaker.md)), earpiece, mics and jack detection not yet. USB audio devices work |
+| Audio | headphone jack playback works (ABOX with the vendor Calliope firmware, CS47L93 codec), 48 kHz; needs the firmware, see Rootfs notes. loudspeaker works too (MAX98506 on UAIF4, [notes](notes/loudspeaker.md)); earpiece, mics and jack detection not yet. USB audio devices work |
 | Cameras, modem, USB 3, suspend | not supported yet |
 
 ## What's in the patches
@@ -92,8 +92,8 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
   with the CS47L93 codec on SPI (headphones on HPOUT2, FLL1 from a 26 MHz
   MCLK1 out of the SoC's XCLKOUT, hence the Exynos8895 variant of
   `exynos-clkout`); ABOX, its SysMMU and power domain in the DT. A MAX98506
-  loudspeaker amplifier driver and the speaker route are in, but the speaker
-  stays silent ([notes](notes/loudspeaker.md))
+  loudspeaker amplifier on UAIF4 (pins gph3-0..3, not the vendor DT's
+  gph0-5..7, see [notes](notes/loudspeaker.md))
 - Bluetooth: BCM4361 on UART1 for `hci_bcm`/`btbcm` (its placeholder
   address is marked unconfigured, so userspace sets the real one)
 - ADC: Exynos8895 variant of `exynos_adc`; the battery, charger and USB
