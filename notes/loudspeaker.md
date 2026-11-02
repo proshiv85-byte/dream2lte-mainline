@@ -1,6 +1,27 @@
 # Loudspeaker (MAX98506 on ABOX UAIF4): state and findings
 
-Status (2026-10-24): **silent on mainline**, works on the vendor 4.4 kernel.
+Status (2026-11-02): **WORKS on mainline.** Root cause: wrong pins. The amp
+is wired to **gph3-0..3** (BCLK, LRCLK, SDO, SDI; vendor DT name
+`aud-cdma-bus`), not gph0-5..7 as the vendor `aud-spk-bus` says. 4.4 worked
+by accident because its ABOX node muxes every ABOX pad group to function 2.
+
+How it was found (no scope needed): sample the GPIO DAT register in a tight
+loop (`/root/gsamp`, mmap of /dev/mem) and count bit toggles per pin while
+playing noise. Findings:
+- gph0-5/6/7 always equal gph0-1/2/3, even as plain GPIO inputs; driving
+  gph0-1 as a GPIO makes gph0-5 read high. They are one net with the codec
+  bus (board or package), so gph0-5..7 must not be muxed.
+- With UAIF0 disabled and slave, nothing toggled on gph0 although UAIF4 was
+  enabled, master and draining RDMA0: UAIF4 never came out there.
+- gph3 to function 2: gph3-0 (BCLK), gph3-1 (LRCLK), gph3-2 (data) toggle
+  and amp reg 0x06 becomes 0x40 (as on 4.4 while playing; 0x00 = no I2S).
+
+Amp 0x06 bit 6 (undocumented in the vendor header) is a good "amp sees
+I2S" indicator.
+
+History below (2026-10-24, before the fix).
+
+Old status: silent on mainline, works on the vendor 4.4 kernel.
 Headphones work on mainline (see the ABOX/CS47L93 patches). The speaker code
 is committed as WIP (patches "add a Maxim MAX98506 speaker amplifier driver",
 "exynos8895-abox: play on UAIF0 or UAIF4", "dream2lte: add the loudspeaker",

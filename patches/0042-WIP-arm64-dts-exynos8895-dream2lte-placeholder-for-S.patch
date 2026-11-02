@@ -1,4 +1,4 @@
-From 96d776d3351a36d2f2038c568bfed7e9e0b6f743 Mon Sep 17 00:00:00 2001
+From 4fa360b12b8ed333704ffaf9dcd05cd1bedd0c41 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sun, 1 Nov 2026 10:18:24 +0200
 Subject: [PATCH 42/42] WIP: arm64: dts: exynos8895-dream2lte: placeholder for
