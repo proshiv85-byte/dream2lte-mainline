@@ -1,4 +1,4 @@
-From b641763a4f5fdb0d53e69bc17fe29b339a8646b4 Mon Sep 17 00:00:00 2001
+From 4373408cce6293242f5b4212cc2b8e24acb7c633 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 11:20:29 +0300
 Subject: [PATCH 35/42] WIP: ASoC: codecs: add a Maxim MAX98506 speaker
@@ -17,8 +17,8 @@ Assisted-by: Claude Opus 5.5 (Anthropic)
 ---
  sound/soc/codecs/Kconfig    |   6 +
  sound/soc/codecs/Makefile   |   2 +
- sound/soc/codecs/max98506.c | 292 ++++++++++++++++++++++++++++++++++++
- 3 files changed, 300 insertions(+)
+ sound/soc/codecs/max98506.c | 343 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 351 insertions(+)
  create mode 100644 sound/soc/codecs/max98506.c
 
 diff --git a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
@@ -67,10 +67,10 @@ index 3d122ace7..640486e69 100644
  obj-$(CONFIG_SND_SOC_LPASS_MACRO_COMMON)	+= snd-soc-lpass-macro-common.o
 diff --git a/sound/soc/codecs/max98506.c b/sound/soc/codecs/max98506.c
 new file mode 100644
-index 000000000..ee008e012
+index 000000000..269c3bf2b
 --- /dev/null
 +++ b/sound/soc/codecs/max98506.c
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,343 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Maxim MAX98506 mono class-D speaker amplifier with boost converter
@@ -85,6 +85,7 @@ index 000000000..ee008e012
 +#include <linux/delay.h>
 +#include <linux/i2c.h>
 +#include <linux/module.h>
++#include <linux/mutex.h>
 +#include <linux/regmap.h>
 +#include <sound/pcm_params.h>
 +#include <sound/soc.h>
@@ -143,6 +144,9 @@ index 000000000..ee008e012
 +
 +struct max98506 {
 +	struct regmap *regmap;
++	struct mutex lock;	/* powered, unmuted and the global enable */
++	bool powered;		/* DAPM routes audio to the speaker */
++	bool unmuted;		/* a stream runs, the I2S clocks are on */
 +};
 +
 +static const DECLARE_TLV_DB_RANGE(max98506_gain_tlv,
@@ -156,25 +160,53 @@ index 000000000..ee008e012
 +	SOC_SINGLE("ALC Threshold", MAX98506_THRESHOLD, 0, 31, 0),
 +};
 +
++/*
++ * The amplifier is on only while DAPM routes audio to it and the stream
++ * runs. Switching it with the I2S clocks stopped pops, so it is switched
++ * from the DAI mute callback like the vendor driver does: unmuted at
++ * prepare, muted at hw_free, before the CPU DAI stops the clocks. The DAPM
++ * power down only comes seconds after that.
++ */
++static void max98506_update_enable(struct snd_soc_component *component)
++{
++	struct max98506 *max98506 = snd_soc_component_get_drvdata(component);
++	bool enable = max98506->powered && max98506->unmuted;
++	unsigned int val;
++
++	if (enable) {
++		snd_soc_component_write(component, MAX98506_GLOBAL_ENABLE,
++					GLOBAL_EN);
++		return;
++	}
++
++	val = snd_soc_component_read(component, MAX98506_GLOBAL_ENABLE);
++	if (!(val & GLOBAL_EN))
++		return;
++	snd_soc_component_write(component, MAX98506_GLOBAL_ENABLE, 0);
++	/* as the vendor driver: let the output ramp down */
++	usleep_range(15000, 16000);
++}
++
 +static int max98506_amp_event(struct snd_soc_dapm_widget *w,
 +			      struct snd_kcontrol *kcontrol, int event)
 +{
 +	struct snd_soc_component *component =
 +		snd_soc_dapm_to_component(w->dapm);
++	struct max98506 *max98506 = snd_soc_component_get_drvdata(component);
 +
++	mutex_lock(&max98506->lock);
 +	switch (event) {
 +	case SND_SOC_DAPM_POST_PMU:
 +		snd_soc_component_update_bits(component, MAX98506_BLOCK_ENABLE,
 +					      BST_EN | SPK_EN, BST_EN | SPK_EN);
-+		snd_soc_component_write(component, MAX98506_GLOBAL_ENABLE,
-+					GLOBAL_EN);
++		max98506->powered = true;
 +		break;
 +	case SND_SOC_DAPM_PRE_PMD:
-+		snd_soc_component_write(component, MAX98506_GLOBAL_ENABLE, 0);
-+		/* as the vendor driver: let the output ramp down */
-+		usleep_range(15000, 16000);
++		max98506->powered = false;
 +		break;
 +	}
++	max98506_update_enable(component);
++	mutex_unlock(&max98506->lock);
 +	return 0;
 +}
 +
@@ -251,9 +283,24 @@ index 000000000..ee008e012
 +	return 0;
 +}
 +
++static int max98506_dai_mute_stream(struct snd_soc_dai *dai, int mute,
++				    int stream)
++{
++	struct snd_soc_component *component = dai->component;
++	struct max98506 *max98506 = snd_soc_component_get_drvdata(component);
++
++	mutex_lock(&max98506->lock);
++	max98506->unmuted = !mute;
++	max98506_update_enable(component);
++	mutex_unlock(&max98506->lock);
++	return 0;
++}
++
 +static const struct snd_soc_dai_ops max98506_dai_ops = {
 +	.set_fmt	= max98506_dai_set_fmt,
 +	.hw_params	= max98506_dai_hw_params,
++	.mute_stream	= max98506_dai_mute_stream,
++	.no_capture_mute = 1,
 +};
 +
 +static struct snd_soc_dai_driver max98506_dai = {
@@ -331,6 +378,10 @@ index 000000000..ee008e012
 +	max98506 = devm_kzalloc(dev, sizeof(*max98506), GFP_KERNEL);
 +	if (!max98506)
 +		return -ENOMEM;
++
++	ret = devm_mutex_init(dev, &max98506->lock);
++	if (ret)
++		return ret;
 +
 +	max98506->regmap = devm_regmap_init_i2c(client, &max98506_regmap);
 +	if (IS_ERR(max98506->regmap))

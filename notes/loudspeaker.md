@@ -19,6 +19,15 @@ playing noise. Findings:
 Amp 0x06 bit 6 (undocumented in the vendor header) is a good "amp sees
 I2S" indicator.
 
+Pops (fixed 2026-11-02): a pop every ~20-40 s while idle. PulseAudio
+exits after 20 s idle (`exit-idle-time`), reqshell's `pactl get-sink-mute`
+poll autospawns it, and each new daemon opens the speaker for ~3 s. The amp
+was switched by DAPM, so it turned off ~5 s after the stream closed, when
+the ABOX had already stopped the I2S clocks: that pops. Fixes: the driver
+switches GLOBAL_EN from the DAI `mute_stream` (as the vendor driver; mute
+runs in hw_free, before the ABOX shutdown disables the UAIF), and the TWRP
+zip sets `exit-idle-time = -1` in /etc/pulse/daemon.conf.d/50-mainline.conf.
+
 History below (2026-10-24, before the fix).
 
 Old status: silent on mainline, works on the vendor 4.4 kernel.

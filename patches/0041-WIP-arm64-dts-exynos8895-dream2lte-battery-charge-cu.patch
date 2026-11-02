@@ -1,4 +1,4 @@
-From c0672e8bb2970e03b8c0d43d3cb68e2703eb5f07 Mon Sep 17 00:00:00 2001
+From 229c761826538825a94abbd1eeef0f40172d1032 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sun, 1 Nov 2026 09:47:04 +0200
 Subject: [PATCH 41/42] WIP: arm64: dts: exynos8895-dream2lte: battery charge

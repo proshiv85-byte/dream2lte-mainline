@@ -1,4 +1,4 @@
-From dd99252d0036f6ad6eaebe530d953484d31a468c Mon Sep 17 00:00:00 2001
+From 7599b1ae0ac9089d44fcae3a815be50a73f5044e Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 11:20:29 +0300
 Subject: [PATCH 36/42] WIP: ASoC: samsung: exynos8895-abox: play on UAIF0 or

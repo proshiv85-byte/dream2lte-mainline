@@ -1,4 +1,4 @@
-From 66bce109dafff6ae101cb502f36c7d207693981c Mon Sep 17 00:00:00 2001
+From d8eddf90a1eea5ac668932b996b432c5755a7a44 Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 11:20:29 +0300
 Subject: [PATCH 37/42] WIP: ASoC: samsung: dream2lte: add the loudspeaker

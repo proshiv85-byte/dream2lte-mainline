@@ -1,4 +1,4 @@
-From 262ac52169ab452892944db320c8f5ee614d4698 Mon Sep 17 00:00:00 2001
+From 5879d4f744318c8ba7b0a0ee1d885a4f32f349ff Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sat, 24 Oct 2026 11:20:29 +0300
 Subject: [PATCH 38/42] WIP: arm64: dts: exynos8895-dream2lte: add the speaker

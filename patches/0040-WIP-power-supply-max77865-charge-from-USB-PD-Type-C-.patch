@@ -1,4 +1,4 @@
-From efc7314976f766094214593c203515588108e961 Mon Sep 17 00:00:00 2001
+From 58457ba9077bdd8d8213a1b2292de31b32a57e4b Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sun, 1 Nov 2026 09:47:04 +0200
 Subject: [PATCH 40/42] WIP: power: supply: max77865: charge from USB PD,

@@ -79,6 +79,13 @@ cat > "$M/etc/udev/rules.d/60-microsd.rules" <<'EOF'
 # short enough for the dw_mmc read timeout.
 ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]", ATTR{queue/max_sectors_kb}="256"
 EOF
+mkdir -p "$M/etc/pulse/daemon.conf.d"
+cat > "$M/etc/pulse/daemon.conf.d/50-mainline.conf" <<'EOF'
+# Stay running: PulseAudio exits after 20 s idle and the next client (a
+# status bar polling the volume) spawns it again; every start opens the
+# speaker for a moment, and the amplifier pops.
+exit-idle-time = -1
+EOF
 tar -C "$M" --owner=0 --group=0 --numeric-owner -cf - . | xz -T0 -6 > "$A/mainline.tar.xz"
 
 echo ">> home (ARMtix overlay + mainline fixes)"
