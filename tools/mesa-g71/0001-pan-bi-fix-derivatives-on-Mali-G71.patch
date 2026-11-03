@@ -1,13 +1,13 @@
-From 3a587a978660ce597d2c1284502222e92a556549 Mon Sep 17 00:00:00 2001
+From 7ce777e304af1fae8530800c711a3a2d7e23c2c2 Mon Sep 17 00:00:00 2001
 From: build <build@local>
 Date: Fri, 23 Oct 2026 21:48:13 +0300
 Subject: [PATCH] pan/bi: fix derivatives on Mali-G71 (and the v6 CLPER lane
  immediate)
 
 ---
- src/panfrost/compiler/bifrost/bi_quirks.h       |  7 ++++++-
- src/panfrost/compiler/bifrost/bifrost_compile.c | 16 ++++++++++++++++
- 2 files changed, 22 insertions(+), 1 deletion(-)
+ src/panfrost/compiler/bifrost/bi_quirks.h     |  7 ++++-
+ .../compiler/bifrost/bifrost_compile.c        | 26 +++++++++++++++++++
+ 2 files changed, 32 insertions(+), 1 deletion(-)
 
 diff --git a/src/panfrost/compiler/bifrost/bi_quirks.h b/src/panfrost/compiler/bifrost/bi_quirks.h
 index 5305db6..c89a484 100644
@@ -35,7 +35,7 @@ index 5305db6..c89a484 100644
     case 0x70: /* G31 */
        return BIFROST_LIMITED_CLPER;
 diff --git a/src/panfrost/compiler/bifrost/bifrost_compile.c b/src/panfrost/compiler/bifrost/bifrost_compile.c
-index d3ec0cc..47715e7 100644
+index d3ec0cc..4470163 100644
 --- a/src/panfrost/compiler/bifrost/bifrost_compile.c
 +++ b/src/panfrost/compiler/bifrost/bifrost_compile.c
 @@ -1489,6 +1489,13 @@ static bi_index
@@ -52,16 +52,26 @@ index d3ec0cc..47715e7 100644
        if (lop == BI_LANE_OP_XOR) {
           bi_index lane_id = bi_fau(BIR_FAU_LANE_ID, false);
           s1 = bi_lshift_xor_i32(b, lane_id, s1, bi_imm_u8(0));
-@@ -1514,6 +1521,15 @@ bi_emit_derivative(bi_builder *b, bi_index dst, nir_intrinsic_instr *instr,
+@@ -1514,6 +1521,25 @@ bi_emit_derivative(bi_builder *b, bi_index dst, nir_intrinsic_instr *instr,
  
     unsigned sz = instr->def.bit_size;
  
-+   /* CLPER returns zero for every lane on G71: rather than +/- the value
-+    * itself, which makes fwidth()-based antialiasing produce half
-+    * transparent shapes, return no derivative at all (hard edges).
++   /* CLPER returns zero for every lane on G71, so the real derivative can't
++    * be computed. Using +/- the value itself makes fwidth()-based
++    * antialiasing produce half transparent shapes; zero breaks shaders that
++    * divide by the derivative or build a pixel-sized box from it (GTK's
++    * rect_coverage() gets 0/0 and draws no text or icons). Return a small
++    * positive value instead, scaled to the input so that p +/- d/2 stays
++    * distinguishable from p: antialiasing degrades to hard edges and
++    * coverage of a pixel inside a shape is 1.
 +    */
 +   if (b->shader->quirks & BIFROST_BROKEN_CLPER) {
-+      bi_mov_i32_to(b, dst, bi_zero());
++      if (sz == 16)
++         bi_fma_to(b, sz, dst, bi_abs(s0), bi_imm_f16(1.0f / 128.0f),
++                   bi_imm_f16(1.0f / 16384.0f));
++      else
++         bi_fma_to(b, sz, dst, bi_abs(s0), bi_imm_f32(1.0f / 65536.0f),
++                   bi_imm_f32(1.0f / 1073741824.0f));
 +      return;
 +   }
 +

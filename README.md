@@ -240,10 +240,12 @@ VP9 is decoded by Firefox's own bundled decoders, so it stays in software.
 On the G71, panfrost's shader derivatives (`dFdx`/`dFdy`/`fwidth`) are
 wrong: the cross-lane read they rely on returns zero there. Anything that
 antialiases with `fwidth()` breaks, e.g. Firefox draws its rounded tabs and
-address bar as half transparent blocks (GTK4 likely too).
-[`tools/mesa-g71`](tools/mesa-g71) patches Mesa to return zero derivatives on
-the G71 (correct shapes, hard edges; plus a fix for the lane constant of the
-G72/G31 path), cross-builds a panfrost-only Mesa and installs it to
+address bar as half transparent blocks, and GTK4 too.
+[`tools/mesa-g71`](tools/mesa-g71) patches Mesa to return a tiny positive
+derivative, scaled to the input, on the G71 (correct shapes, hard edges;
+plus a fix for the lane constant of the G72/G31 path). Zero would not do:
+GTK4 builds a pixel-sized box from `fwidth()` and gets 0/0 coverage, so it
+draws no text or icons. The script cross-builds a panfrost-only Mesa and installs it to
 `/opt/mesa-g71`, which [`gpu-env`](rootfs/armtix-gpu-env) uses when present. Nothing in `/usr` is
 replaced, so pacman updates don't break it; rebuild after a Mesa update:
 

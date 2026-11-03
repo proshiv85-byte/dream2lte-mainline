@@ -6,8 +6,9 @@
 #
 # On G71, panfrost's derivatives (dFdx/dFdy/fwidth) returned +/- the value
 # itself, so fwidth()-based antialiasing (Firefox's rounded clips, GTK4)
-# drew half transparent blocks. With the patch they are zero on G71 (hard
-# edges, correct shapes). Needs on the PC: meson, ninja, clang, llvm, libclc,
+# drew half transparent blocks. With the patch they are a tiny positive
+# value scaled to the input on G71 (hard edges, correct shapes; zero made
+# GTK4's coverage 0/0, so it drew no text or icons). Needs on the PC: meson, ninja, clang, llvm, libclc,
 # spirv-llvm-translator (to build Mesa's CL kernel compilers natively) and an
 # aarch64-linux-gnu cross toolchain. The phone's libraries are copied to
 # out/sysroot (tools/phone-sysroot.sh). Re-run after a Mesa update on the
