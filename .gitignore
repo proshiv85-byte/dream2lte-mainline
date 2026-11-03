@@ -11,3 +11,5 @@
 /tools/gpioget
 /shim/shim.elf
 /shim/shim.bin
+/shim/shim.dtb
+/shim/Image.lz4

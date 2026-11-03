@@ -10,19 +10,25 @@
  *      (simple-framebuffer at 0xcc000000) keeps being scanned out,
  *   2. optionally (DEV_RECOVERY) presets the Samsung reboot reason to
  *      "recovery", so any reset of the new kernel lands in TWRP,
- *   3. copies the DTB to DTB_DEST and the Image to IMAGE_DEST,
+ *   3. copies the DTB to DTB_DEST and the Image to IMAGE_DEST (with
+ *      LZ4_IMAGE, the Image is LZ4-compressed: moved to LZ4_SCRATCH first,
+ *      then decompressed to IMAGE_DEST by lz4.c),
  *   4. copies S-Boot's boot mode (the value of "androidboot.mode=" in the
  *      bootargs of the DTB S-Boot hands over, e.g. "charger" when a cable
  *      powered the phone on) into the placeholder of /chosen/
  *      dream2lte,sboot-mode in our DTB, or "none" (no androidboot.mode),
  *      or "no-dtb" (no DTB found), for the initramfs,
- *   5. enters the kernel per Documentation/arch/arm64/booting.rst.
+ *   5. hands S-Boot's ramdisk (if the boot.img has a real one) over to the
+ *      kernel, see initrd.c,
+ *   6. enters the kernel per Documentation/arch/arm64/booting.rst.
  *
  * Otherwise the DTB handed over by S-Boot (at 0x8a000000) is ignored.
  */
 
 #define IMAGE_DEST		0x80200000
 #define DTB_DEST		0x8b000000
+/* above the decompressed Image and its BSS, below S-Boot's ramdisk */
+#define LZ4_SCRATCH		0x84000000
 
 #define DECON_F_HW_SW_TRIG	0x12860070
 #define DECON_TRIG_VAL		0x1281
@@ -53,6 +59,11 @@ _head:
 	.long	0			/* res5 */
 
 start:
+	/* a stack for initrd.c, inside the shim below IMAGE_DEST */
+	adrp	x4, stack_top
+	add	x4, x4, :lo12:stack_top
+	mov	sp, x4
+
 	ldr	x4, =DECON_F_HW_SW_TRIG
 	ldr	w5, =DECON_TRIG_VAL
 	str	w5, [x4]
@@ -77,6 +88,27 @@ start:
 	cmp	x4, x5
 	b.lo	1b
 
+#ifdef LZ4_IMAGE
+	/* compressed Image -> LZ4_SCRATCH (disjoint, forward copy) */
+	adrp	x4, image_start
+	add	x4, x4, :lo12:image_start
+	adrp	x5, image_end
+	add	x5, x5, :lo12:image_end
+	ldr	x6, =LZ4_SCRATCH
+2:	ldp	x7, x8, [x4], #16
+	stp	x7, x8, [x6], #16
+	cmp	x4, x5
+	b.lo	2b
+
+	/* lz4_unpack(LZ4_SCRATCH, length, IMAGE_DEST); hang if not LZ4 */
+	adrp	x4, image_start
+	add	x4, x4, :lo12:image_start
+	sub	x1, x5, x4
+	ldr	x0, =LZ4_SCRATCH
+	ldr	x2, =IMAGE_DEST
+	bl	lz4_unpack
+5:	cbz	x0, 5b
+#else
 	/*
 	 * Image -> IMAGE_DEST.  The destination lies above the source and
 	 * the two may overlap, so copy backwards.
@@ -92,8 +124,13 @@ start:
 	stp	x7, x8, [x6, #-16]!
 	cmp	x5, x4
 	b.hi	2b
+#endif
 
 	bl	sboot_mode
+
+	ldr	x0, =DTB_DEST
+	ldr	x1, =SBOOT_DTB
+	bl	initrd_handover
 
 	/* The copied code must not be fetched through stale I-cache lines */
 	dsb	sy
@@ -192,6 +229,13 @@ mode_none:
 mode_nodtb:
 	.asciz	"no-dtb"
 
+	.balign	16
+stack:
+	.space	4096
+stack_top:
+
+	/* the payload goes after all code, initrd.c included */
+	.section .payload, "a"
 	.balign	16
 dtb_start:
 	.incbin	DTB_PATH

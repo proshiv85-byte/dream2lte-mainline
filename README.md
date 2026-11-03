@@ -148,7 +148,20 @@ boot image carries a tiny shim ([`shim/shim.S`](shim/shim.S)) that
 3. with `DEV_RECOVERY=1`, presets the Samsung reboot reason to "recovery" so a
    crash or reset of the new kernel lands in TWRP instead of boot looping,
 4. copies S-Boot's boot mode (`androidboot.mode=` in the bootargs of the DTB
-   S-Boot passes) into `/chosen/dream2lte,sboot-mode` of our DTB, or `none`.
+   S-Boot passes) into `/chosen/dream2lte,sboot-mode` of our DTB, or `none`,
+5. hands a real boot.img ramdisk over to the kernel: S-Boot loads it to
+   `0x89000000` and puts its bounds into the DTB it passes; the shim copies
+   them into `/chosen/linux,initrd-start/-end` of ours
+   ([`shim/initrd.c`](shim/initrd.c)). The zero-filled dummy ramdisk of our
+   own boot images is left alone,
+6. with `LZ4=1`, carries the Image LZ4-compressed (legacy format, `lz4 -l`)
+   and unpacks it ([`shim/lz4.c`](shim/lz4.c)), for kernels that don't fit
+   the 40 MiB BOOT partition uncompressed (postmarketOS). This runs with the
+   MMU and caches off, so it adds about 15 s to the boot.
+
+[`shim/shim.lds`](shim/shim.lds) keeps all shim code and data below the
+payload, which the Image is copied or unpacked over; without it, lld puts
+`.rodata` after the payload.
 
 Otherwise the DTB passed by S-Boot is ignored, the kernel command line is
 built in. A small initramfs mounts `/dev/sda27` and switches to `/sbin/init`.
