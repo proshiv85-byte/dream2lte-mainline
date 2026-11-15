@@ -1,0 +1,397 @@
+From a7d675d6f38a7debce8605a36d32a05001efd74d Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sun, 15 Nov 2026 10:47:50 +0200
+Subject: [PATCH 43/51] WIP: phy: samsung: exynos5-usbdrd: Exynos8895
+ SuperSpeed and suspend
+
+Set up the SuperSpeed part of the Exynos8895 USBCON PHY on the port that
+carries the lanes for the plug orientation, which the Type-C controller
+reports on a GPIO (orientation-gpios, as the vendor kernel reads it):
+route PIPE3 to it, power it and power down the SuperSpeed part of the
+other port. A change of the GPIO while the PHY is on re-routes it.
+Apply the vendor's device-mode SuperSpeed tuning, including the control
+register (CR) port writes, in power_on: the CR port doesn't answer while
+the PHY is isolated.
+
+Callers power the PHY off before exit, which stops the reference clock
+the registers need: exit enables it around its register writes (system
+suspend aborted with an external abort).
+
+Untested at 5 Gbps so far (USB 2 cables only); the orientation GPIO did
+not change on a flipped plug with a USB 2 cable.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/phy/samsung/phy-exynos5-usbdrd.c | 281 ++++++++++++++++++++---
+ 1 file changed, 246 insertions(+), 35 deletions(-)
+
+diff --git a/drivers/phy/samsung/phy-exynos5-usbdrd.c b/drivers/phy/samsung/phy-exynos5-usbdrd.c
+index 43adedf0e..80005785f 100644
+--- a/drivers/phy/samsung/phy-exynos5-usbdrd.c
++++ b/drivers/phy/samsung/phy-exynos5-usbdrd.c
+@@ -11,6 +11,8 @@
+ #include <linux/bitfield.h>
+ #include <linux/clk.h>
+ #include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+@@ -535,6 +537,9 @@ struct exynos5_usbdrd_phy {
+ 	void __iomem *reg_phy2;
+ 	void __iomem *reg_refclk;
+ 	bool regs_checked;
++	struct gpio_desc *orient_gpio;
++	int ss_port;
++	bool ss_on;
+ 
+ 	struct typec_switch_dev *sw;
+ 	enum typec_orientation orientation;
+@@ -1736,6 +1741,169 @@ static const struct phy_ops exynos850_usbdrd_phy_ops = {
+ #define EXYNOS8895_MPLL_MULTIPLIER_26MHZ	0x60
+ #define EXYNOS8895_SSC_REFCLKSEL_26MHZ		0x108U
+ 
++#define EXYNOS8895_DRD_PHYREG0_CR_WRITE		BIT(19)
++#define EXYNOS8895_DRD_PHYREG0_CR_READ		BIT(18)
++#define EXYNOS8895_DRD_PHYREG0_CR_DATA_IN	GENMASK(17, 2)
++#define EXYNOS8895_DRD_PHYREG0_CR_CAP_DATA	BIT(1)
++#define EXYNOS8895_DRD_PHYREG0_CR_CAP_ADDR	BIT(0)
++#define EXYNOS8895_DRD_PHYREG1_CR_ACK		BIT(0)
++
++/*
++ * Control register (CR) port of the SuperSpeed PHY: one handshake per
++ * capture/read/write strobe, as in the vendor kernel's USB PHY CAL.
++ */
++static int exynos8895_cr_strobe(void __iomem *base, u32 *phyreg0, u32 bit)
++{
++	u32 reg;
++	int ret;
++
++	*phyreg0 |= bit;
++	writel(*phyreg0, base + EXYNOS5_DRD_PHYREG0);
++	ret = readl_poll_timeout_atomic(base + EXYNOS5_DRD_PHYREG1, reg,
++					reg & EXYNOS8895_DRD_PHYREG1_CR_ACK,
++					1, 100);
++	*phyreg0 &= ~bit;
++	writel(*phyreg0, base + EXYNOS5_DRD_PHYREG0);
++	ret |= readl_poll_timeout_atomic(base + EXYNOS5_DRD_PHYREG1, reg,
++					 !(reg & EXYNOS8895_DRD_PHYREG1_CR_ACK),
++					 1, 100);
++	return ret;
++}
++
++static int exynos8895_cr_write(struct exynos5_usbdrd_phy *phy_drd,
++			       void __iomem *base, u16 addr, u16 val)
++{
++	u32 phyreg0;
++	int ret;
++
++	phyreg0 = readl(base + EXYNOS5_DRD_PHYREG0) & ~GENMASK(19, 0);
++	phyreg0 |= FIELD_PREP(EXYNOS8895_DRD_PHYREG0_CR_DATA_IN, addr);
++	writel(phyreg0, base + EXYNOS5_DRD_PHYREG0);
++	ret = exynos8895_cr_strobe(base, &phyreg0,
++				   EXYNOS8895_DRD_PHYREG0_CR_CAP_ADDR);
++
++	phyreg0 &= ~EXYNOS8895_DRD_PHYREG0_CR_DATA_IN;
++	phyreg0 |= FIELD_PREP(EXYNOS8895_DRD_PHYREG0_CR_DATA_IN, val);
++	writel(phyreg0, base + EXYNOS5_DRD_PHYREG0);
++	ret |= exynos8895_cr_strobe(base, &phyreg0,
++				    EXYNOS8895_DRD_PHYREG0_CR_CAP_DATA);
++	ret |= exynos8895_cr_strobe(base, &phyreg0,
++				    EXYNOS8895_DRD_PHYREG0_CR_WRITE);
++	if (ret)
++		dev_warn(phy_drd->dev, "CR port write %#x timed out\n", addr);
++	return ret;
++}
++
++/* SuperSpeed tuning for device mode (vendor values for Exynos8895) */
++static void exynos8895_usbdrd_ss_tune(struct exynos5_usbdrd_phy *phy_drd,
++				      void __iomem *base)
++{
++	u32 reg;
++
++	reg = readl(base + EXYNOS8895_DRD_PHYPARAM2);
++	reg &= ~(EXYNOS8895_DRD_PHYPARAM2_TX_VBOOST |
++		 EXYNOS8895_DRD_PHYPARAM2_LOS_BIAS);
++	reg |= FIELD_PREP(EXYNOS8895_DRD_PHYPARAM2_TX_VBOOST, 0x6) |
++	       FIELD_PREP(EXYNOS8895_DRD_PHYPARAM2_LOS_BIAS, 0x5);
++	writel(reg, base + EXYNOS8895_DRD_PHYPARAM2);
++
++	/* mask abnormal LFPS and glitches */
++	reg = readl(base + EXYNOS8895_DRD_PHYPCSVAL);
++	reg &= ~EXYNOS8895_DRD_PHYPCSVAL_LOS_MASK;
++	reg |= FIELD_PREP(EXYNOS8895_DRD_PHYPCSVAL_LOS_MASK, 0x104);
++	writel(reg, base + EXYNOS8895_DRD_PHYPCSVAL);
++
++	/* RXDET_MEAS_TIME */
++	exynos8895_cr_write(phy_drd, base, 0x1010, 0x80);
++	/* TX swing (full 0x7f) and 3.5 dB de-emphasis (0x16) through the PCS */
++	exynos8895_cr_write(phy_drd, base, 0x1002, 0x4000 | (0x16 << 7) | 0x7f);
++	/* override los_bias = 5, los_level = 9 and tx_vboost_lvl */
++	exynos8895_cr_write(phy_drd, base, 0x15, 0xa409);
++	exynos8895_cr_write(phy_drd, base, 0x12, 0x6 << 13);
++}
++
++static int exynos8895_usbdrd_orientation(struct exynos5_usbdrd_phy *phy_drd)
++{
++	if (!phy_drd->orient_gpio)
++		return 0;
++	return gpiod_get_value_cansleep(phy_drd->orient_gpio) > 0;
++}
++
++/*
++ * Route PIPE3 to port 0 (normal) or port 1 (flipped plug) and power the
++ * SuperSpeed part of that port only. The high-speed (UTMI) part always
++ * stays on port 0.
++ */
++static void exynos8895_usbdrd_ss_select(struct exynos5_usbdrd_phy *phy_drd,
++					int port)
++{
++	void __iomem *base = phy_drd->reg_phy, *base2 = phy_drd->reg_phy2;
++	void __iomem *ss = port ? base2 : base;
++	u32 reg, clkrst;
++
++	reg = readl(base + EXYNOS8895_DRD_PHYSELECTION);
++	if (port)
++		reg |= EXYNOS8895_DRD_PHYSEL_PIPE | EXYNOS8895_DRD_PHYSEL_PIPE_CLK;
++	else
++		reg &= ~(EXYNOS8895_DRD_PHYSEL_PIPE | EXYNOS8895_DRD_PHYSEL_PIPE_CLK);
++	writel(reg, base + EXYNOS8895_DRD_PHYSELECTION);
++
++	if (port) {
++		/* same reference clock setup as port 0, then a port reset */
++		reg = readl(base2 + EXYNOS5_DRD_PHYPARAM0);
++		writel(reg & ~PHYPARAM0_REF_USE_PAD, base2 + EXYNOS5_DRD_PHYPARAM0);
++		reg = readl(base2 + EXYNOS5_DRD_PHYPIPE);
++		writel(reg | EXYNOS8895_DRD_PHYPIPE_CLOCK_SEL,
++		       base2 + EXYNOS5_DRD_PHYPIPE);
++		clkrst = readl(base + EXYNOS5_DRD_PHYCLKRST) & ~PHYCLKRST_PORTRESET;
++		writel(clkrst | PHYCLKRST_PORTRESET, base2 + EXYNOS5_DRD_PHYCLKRST);
++		udelay(10);
++		writel(clkrst, base2 + EXYNOS5_DRD_PHYCLKRST);
++	}
++
++	/* power up what is needed first, then power down the rest */
++	reg = readl(base + EXYNOS5_DRD_PHYTEST);
++	reg &= ~(PHYTEST_POWERDOWN_HSP | PHYTEST_POWERDOWN_SSP);
++	writel(reg, base + EXYNOS5_DRD_PHYTEST);
++	reg = readl(base2 + EXYNOS5_DRD_PHYTEST);
++	reg &= ~(PHYTEST_POWERDOWN_HSP | PHYTEST_POWERDOWN_SSP);
++	writel(reg, base2 + EXYNOS5_DRD_PHYTEST);
++	udelay(1000);
++	if (port) {
++		reg = readl(base + EXYNOS5_DRD_PHYTEST);
++		writel(reg | PHYTEST_POWERDOWN_SSP, base + EXYNOS5_DRD_PHYTEST);
++		reg = readl(base2 + EXYNOS5_DRD_PHYTEST);
++		writel(reg | PHYTEST_POWERDOWN_HSP, base2 + EXYNOS5_DRD_PHYTEST);
++	} else {
++		reg = readl(base2 + EXYNOS5_DRD_PHYTEST);
++		reg |= PHYTEST_POWERDOWN_HSP | PHYTEST_POWERDOWN_SSP;
++		writel(reg, base2 + EXYNOS5_DRD_PHYTEST);
++	}
++	reg = readl(base2 + EXYNOS5_DRD_PHYUTMI);
++	reg |= PHYUTMI_FORCESLEEP | PHYUTMI_FORCESUSPEND;
++	writel(reg, base2 + EXYNOS5_DRD_PHYUTMI);
++	udelay(500);
++
++	/* the CR port only answers once the PHY is out of isolation */
++	if (phy_drd->ss_on)
++		exynos8895_usbdrd_ss_tune(phy_drd, ss);
++	phy_drd->ss_port = port;
++	dev_dbg(phy_drd->dev, "SuperSpeed on port %d\n", port);
++}
++
++static irqreturn_t exynos8895_usbdrd_orient_irq(int irq, void *data)
++{
++	struct exynos5_usbdrd_phy *phy_drd = data;
++	int port;
++
++	guard(mutex)(&phy_drd->phy_mutex);
++	port = exynos8895_usbdrd_orientation(phy_drd);
++	if (phy_drd->ss_on && port != phy_drd->ss_port)
++		exynos8895_usbdrd_ss_select(phy_drd, port);
++
++	return IRQ_HANDLED;
++}
++
+ static int exynos8895_usbdrd_map_extra_regs(struct exynos5_usbdrd_phy *phy_drd,
+ 					    struct platform_device *pdev)
+ {
+@@ -1747,12 +1915,40 @@ static int exynos8895_usbdrd_map_extra_regs(struct exynos5_usbdrd_phy *phy_drd,
+ 	if (IS_ERR(phy_drd->reg_refclk))
+ 		return PTR_ERR(phy_drd->reg_refclk);
+ 
++	/*
++	 * The Type-C controller reports the plug orientation on a GPIO
++	 * (active: flipped). It picks which of the two ports carries the
++	 * SuperSpeed lanes.
++	 */
++	phy_drd->orient_gpio = devm_gpiod_get_optional(&pdev->dev, "orientation",
++						       GPIOD_IN);
++	if (IS_ERR(phy_drd->orient_gpio))
++		return dev_err_probe(&pdev->dev, PTR_ERR(phy_drd->orient_gpio),
++				     "cannot get the orientation GPIO\n");
++
++	if (phy_drd->orient_gpio) {
++		int irq = gpiod_to_irq(phy_drd->orient_gpio);
++		int ret;
++
++		if (irq < 0)
++			return dev_err_probe(&pdev->dev, irq,
++					     "no IRQ for the orientation GPIO\n");
++		ret = devm_request_threaded_irq(&pdev->dev, irq, NULL,
++						exynos8895_usbdrd_orient_irq,
++						IRQF_TRIGGER_RISING |
++						IRQF_TRIGGER_FALLING |
++						IRQF_ONESHOT,
++						"usbdrd-orientation", phy_drd);
++		if (ret)
++			return ret;
++	}
++
+ 	return 0;
+ }
+ 
+ static void exynos8895_usbdrd_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
+ {
+-	void __iomem *base, *base2;
++	void __iomem *base;
+ 	u32 reg, clkrst;
+ 
+ 	/* Newer USBCON versions have a version register at offset 0 */
+@@ -1766,7 +1962,6 @@ static void exynos8895_usbdrd_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
+ 		phy_drd->regs_checked = true;
+ 	}
+ 	base = phy_drd->reg_phy;
+-	base2 = phy_drd->reg_phy2;
+ 
+ 	/* Reference clock path of the PHY */
+ 	reg = readl(phy_drd->reg_refclk + 0xc);
+@@ -1793,11 +1988,6 @@ static void exynos8895_usbdrd_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
+ 	writel(reg & ~EXYNOS8895_DRD_LINKSYSTEM_LINK_SW_RST,
+ 	       base + EXYNOS5_DRD_LINKSYSTEM);
+ 
+-	/* PIPE3 from port 0 */
+-	reg = readl(base + EXYNOS8895_DRD_PHYSELECTION);
+-	reg &= ~(EXYNOS8895_DRD_PHYSEL_PIPE | EXYNOS8895_DRD_PHYSEL_PIPE_CLK);
+-	writel(reg, base + EXYNOS8895_DRD_PHYSELECTION);
+-
+ 	clkrst = readl(base + EXYNOS5_DRD_PHYCLKRST);
+ 	clkrst |= PHYCLKRST_PORTRESET;
+ 	clkrst &= ~PHYCLKRST_REFCLKSEL;
+@@ -1831,20 +2021,8 @@ static void exynos8895_usbdrd_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
+ 	clkrst &= ~PHYCLKRST_PORTRESET;
+ 	writel(clkrst, base + EXYNOS5_DRD_PHYCLKRST);
+ 
+-	/* Power up port 0, power down the second port */
+-	reg = readl(base + EXYNOS5_DRD_PHYTEST);
+-	reg &= ~(PHYTEST_POWERDOWN_HSP | PHYTEST_POWERDOWN_SSP);
+-	writel(reg, base + EXYNOS5_DRD_PHYTEST);
+-	reg = readl(base2 + EXYNOS5_DRD_PHYTEST);
+-	reg &= ~(PHYTEST_POWERDOWN_HSP | PHYTEST_POWERDOWN_SSP);
+-	writel(reg, base2 + EXYNOS5_DRD_PHYTEST);
+-	udelay(1000);
+-	reg |= PHYTEST_POWERDOWN_HSP | PHYTEST_POWERDOWN_SSP;
+-	writel(reg, base2 + EXYNOS5_DRD_PHYTEST);
+-	reg = readl(base2 + EXYNOS5_DRD_PHYUTMI);
+-	reg |= PHYUTMI_FORCESLEEP | PHYUTMI_FORCESUSPEND;
+-	writel(reg, base2 + EXYNOS5_DRD_PHYUTMI);
+-	udelay(500);
++	exynos8895_usbdrd_ss_select(phy_drd,
++				    exynos8895_usbdrd_orientation(phy_drd));
+ 
+ 	/* VBUS is not routed to the PHY: force VBUS valid */
+ 	reg = readl(base + EXYNOS5_DRD_LINKSYSTEM);
+@@ -1891,18 +2069,6 @@ static void exynos8895_usbdrd_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
+ 	       FIELD_PREP(EXYNOS8895_DRD_PHYPARAM0_OTGTUNE, 0x3) |
+ 	       FIELD_PREP(EXYNOS8895_DRD_PHYPARAM0_COMPDISTUNE, 0x2);
+ 	writel(reg, base + EXYNOS5_DRD_PHYPARAM0);
+-
+-	reg = readl(base + EXYNOS8895_DRD_PHYPARAM2);
+-	reg &= ~(EXYNOS8895_DRD_PHYPARAM2_TX_VBOOST |
+-		 EXYNOS8895_DRD_PHYPARAM2_LOS_BIAS);
+-	reg |= FIELD_PREP(EXYNOS8895_DRD_PHYPARAM2_TX_VBOOST, 0x6) |
+-	       FIELD_PREP(EXYNOS8895_DRD_PHYPARAM2_LOS_BIAS, 0x5);
+-	writel(reg, base + EXYNOS8895_DRD_PHYPARAM2);
+-
+-	reg = readl(base + EXYNOS8895_DRD_PHYPCSVAL);
+-	reg &= ~EXYNOS8895_DRD_PHYPCSVAL_LOS_MASK;
+-	reg |= FIELD_PREP(EXYNOS8895_DRD_PHYPCSVAL_LOS_MASK, 0x104);
+-	writel(reg, base + EXYNOS8895_DRD_PHYPCSVAL);
+ }
+ 
+ static int exynos8895_usbdrd_phy_init(struct phy *phy)
+@@ -1928,8 +2094,20 @@ static int exynos8895_usbdrd_phy_exit(struct phy *phy)
+ 	struct exynos5_usbdrd_phy *phy_drd = to_usbdrd_phy(inst);
+ 	void __iomem *base = phy_drd->reg_phy;
+ 	u32 reg;
++	int ret;
++
++	/*
++	 * Callers power the PHY off first, which stops the reference clock:
++	 * the registers need it.
++	 */
++	ret = clk_bulk_prepare_enable(phy_drd->drv_data->n_core_clks,
++				      phy_drd->core_clks);
++	if (ret)
++		return ret;
+ 
+ 	scoped_guard(mutex, &phy_drd->phy_mutex) {
++		phy_drd->ss_on = false;
++
+ 		reg = readl(base + EXYNOS5_DRD_PHYUTMI);
+ 		reg &= ~(PHYUTMI_IDPULLUP | PHYUTMI_DRVVBUS |
+ 			 PHYUTMI_VBUSVLDEXTSEL | PHYUTMI_VBUSVLDEXT);
+@@ -1945,16 +2123,49 @@ static int exynos8895_usbdrd_phy_exit(struct phy *phy)
+ 		writel(reg, base + EXYNOS5_DRD_LINKSYSTEM);
+ 	}
+ 
++	clk_bulk_disable_unprepare(phy_drd->drv_data->n_core_clks,
++				   phy_drd->core_clks);
+ 	clk_bulk_disable_unprepare(phy_drd->drv_data->n_clks, phy_drd->clks);
+ 
+ 	return 0;
+ }
+ 
++static int exynos8895_usbdrd_phy_power_on(struct phy *phy)
++{
++	struct phy_usb_instance *inst = phy_get_drvdata(phy);
++	struct exynos5_usbdrd_phy *phy_drd = to_usbdrd_phy(inst);
++	int ret;
++
++	ret = exynos5_usbdrd_phy_power_on(phy);
++	if (ret)
++		return ret;
++
++	scoped_guard(mutex, &phy_drd->phy_mutex) {
++		phy_drd->ss_on = true;
++		/* pick up a plug flipped while the PHY was off, then tune */
++		exynos8895_usbdrd_ss_select(phy_drd,
++					    exynos8895_usbdrd_orientation(phy_drd));
++	}
++
++	return 0;
++}
++
++static int exynos8895_usbdrd_phy_power_off(struct phy *phy)
++{
++	struct phy_usb_instance *inst = phy_get_drvdata(phy);
++	struct exynos5_usbdrd_phy *phy_drd = to_usbdrd_phy(inst);
++
++	scoped_guard(mutex, &phy_drd->phy_mutex)
++		phy_drd->ss_on = false;
++
++	return exynos5_usbdrd_phy_power_off(phy);
++}
++
+ static const struct phy_ops exynos8895_usbdrd_phy_ops = {
+ 	.init		= exynos8895_usbdrd_phy_init,
+ 	.exit		= exynos8895_usbdrd_phy_exit,
+-	.power_on	= exynos5_usbdrd_phy_power_on,
+-	.power_off	= exynos5_usbdrd_phy_power_off,
++	.power_on	= exynos8895_usbdrd_phy_power_on,
++	.power_off	= exynos8895_usbdrd_phy_power_off,
+ 	.owner		= THIS_MODULE,
+ };
+ 

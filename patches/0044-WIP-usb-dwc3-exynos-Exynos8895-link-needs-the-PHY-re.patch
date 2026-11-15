@@ -1,0 +1,33 @@
+From e4bbba75052422eddc9fbce3ba28ec79adbf3c25 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sun, 15 Nov 2026 10:47:50 +0200
+Subject: [PATCH 44/51] WIP: usb: dwc3: exynos: Exynos8895 link needs the PHY
+ reference clock
+
+The DWC3 link registers of the Exynos8895 also need USB30DRD_REF_CLK,
+which the PHY gates in power_off. On resume dwc3 accesses them before the
+PHY is powered again, and the access aborted. Keep the clock on in the
+glue.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/usb/dwc3/dwc3-exynos.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/usb/dwc3/dwc3-exynos.c b/drivers/usb/dwc3/dwc3-exynos.c
+index 29f944c7d..2aa25a38a 100644
+--- a/drivers/usb/dwc3/dwc3-exynos.c
++++ b/drivers/usb/dwc3/dwc3-exynos.c
+@@ -175,9 +175,10 @@ static const struct dwc3_exynos_driverdata exynos7870_drvdata = {
+ 	.suspend_clk_idx = -1,
+ };
+ 
++/* the link registers also need the PHY reference clock */
+ static const struct dwc3_exynos_driverdata exynos8895_drvdata = {
+-	.clk_names = { "aclk", "susp_clk" },
+-	.num_clks = 2,
++	.clk_names = { "aclk", "susp_clk", "ref" },
++	.num_clks = 3,
+ 	.suspend_clk_idx = 1,
+ };
+ 

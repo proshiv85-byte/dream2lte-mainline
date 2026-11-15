@@ -1,0 +1,77 @@
+From 8f0d26f5d981706f366fe337ad078aa2e37174f1 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sun, 15 Nov 2026 10:47:51 +0200
+Subject: [PATCH 47/51] WIP: power: supply: max77865: stop the charger watchdog
+ during suspend
+
+Nothing clears the charger watchdog while the system sleeps and charging
+would stop when it expires (about 95 s): turn it off in suspend, back on
+and clear it in resume, and run the poll right away.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/power/supply/max77865_charger.c | 37 +++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/drivers/power/supply/max77865_charger.c b/drivers/power/supply/max77865_charger.c
+index 2146e249f..0893fccd0 100644
+--- a/drivers/power/supply/max77865_charger.c
++++ b/drivers/power/supply/max77865_charger.c
+@@ -47,6 +47,7 @@
+ #define MAX77865_CHG_CNFG_00_CHG	BIT(0)
+ #define MAX77865_CHG_CNFG_00_OTG	BIT(1)
+ #define MAX77865_CHG_CNFG_00_BOOST	BIT(3)
++#define MAX77865_CHG_CNFG_00_WDTEN	BIT(4)
+ #define MAX77865_CHG_REG_CNFG_02	0xb9
+ #define MAX77865_CHG_CC			GENMASK(5, 0)
+ #define MAX77865_CHG_CC_STEP_UA		50000
+@@ -1069,6 +1070,41 @@ static void max77865_charger_shutdown(struct i2c_client *client)
+ 		max77865_qc_release(chg, true);
+ }
+ 
++/*
++ * Nothing clears the charger watchdog while the system sleeps, and charging
++ * would stop when it expires: turn it off for the time of the suspend. The
++ * charger keeps the last current settings meanwhile.
++ */
++static int max77865_charger_suspend(struct device *dev)
++{
++	struct max77865_charger *chg = dev_get_drvdata(dev);
++
++	disable_delayed_work_sync(&chg->poll);
++	regmap_write_bits(chg->regmap, MAX77865_CHG_REG_CNFG_06,
++			  MAX77865_CHG_WDTCLR, MAX77865_CHG_WDTCLR_CLEAR);
++	return regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_00,
++				  MAX77865_CHG_CNFG_00_WDTEN, 0);
++}
++
++static int max77865_charger_resume(struct device *dev)
++{
++	struct max77865_charger *chg = dev_get_drvdata(dev);
++	int ret;
++
++	ret = regmap_update_bits(chg->regmap, MAX77865_CHG_REG_CNFG_00,
++				 MAX77865_CHG_CNFG_00_WDTEN,
++				 MAX77865_CHG_CNFG_00_WDTEN);
++	regmap_write_bits(chg->regmap, MAX77865_CHG_REG_CNFG_06,
++			  MAX77865_CHG_WDTCLR, MAX77865_CHG_WDTCLR_CLEAR);
++	enable_delayed_work(&chg->poll);
++	schedule_delayed_work(&chg->poll, 0);
++	return ret;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(max77865_charger_pm_ops,
++				max77865_charger_suspend,
++				max77865_charger_resume);
++
+ static const struct of_device_id max77865_charger_of_match[] = {
+ 	{ .compatible = "maxim,max77865-charger" },
+ 	{ }
+@@ -1079,6 +1115,7 @@ static struct i2c_driver max77865_charger_driver = {
+ 	.driver = {
+ 		.name = "max77865-charger",
+ 		.of_match_table = max77865_charger_of_match,
++		.pm = pm_sleep_ptr(&max77865_charger_pm_ops),
+ 	},
+ 	.probe = max77865_charger_probe,
+ 	.shutdown = max77865_charger_shutdown,

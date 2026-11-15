@@ -1,7 +1,7 @@
 From c3bb57644aba191fd3090621c5d437d4cd59978b Mon Sep 17 00:00:00 2001
 From: proshiv85-byte <proshiv85@gmail.com>
 Date: Sun, 1 Nov 2026 09:47:04 +0200
-Subject: [PATCH 39/42] WIP: usb: typec: s2mm005: report the source power,
+Subject: [PATCH 39/51] WIP: usb: typec: s2mm005: report the source power,
  select a USB PD contract
 
 As a sink, register a power supply that feeds the MAX77865 charger with

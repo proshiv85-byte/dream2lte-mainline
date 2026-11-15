@@ -1,0 +1,10 @@
+ro.adb.secure=0
+ro.debuggable=1
+persist.sys.usb.config=adb
+sys.usb.controller=10c00000.usb
+service.adb.root=1
+ro.hardware.egl=mesa
+ro.hardware.gralloc=minigbm
+ro.hardware.hwcomposer=drm
+ro.lmk.use_psi=true
+ro.lmk.use_minfree_levels=false

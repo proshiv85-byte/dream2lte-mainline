@@ -1,0 +1,231 @@
+From e4ae1e987963e3538252a4b8cd7649f85e177789 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sun, 15 Nov 2026 10:47:51 +0200
+Subject: [PATCH 51/51] WIP: mm: memfd: answer the ashmem ioctls on memfd files
+
+For running Android userspace on this kernel: Android's libcutils only
+uses memfd for shared memory when the kernel answers the old ashmem
+ioctls on memfds, otherwise it falls back to /dev/ashmem, which mainline
+no longer has. Behind CONFIG_MEMFD_ASHMEM_SHIM (Android test kernel
+only): size, name, protection mask (mapped onto write seals), pinning as
+a no-op. Not compatible with CONFIG_DEBUG_VM (see the comment).
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ include/linux/memfd.h  |   3 +
+ mm/Kconfig             |   7 ++
+ mm/Makefile            |   1 +
+ mm/memfd-ashmem-shim.c | 144 +++++++++++++++++++++++++++++++++++++++++
+ mm/memfd.c             |   4 ++
+ 5 files changed, 159 insertions(+)
+ create mode 100644 mm/memfd-ashmem-shim.c
+
+diff --git a/include/linux/memfd.h b/include/linux/memfd.h
+index c159e40e3..1eeb05c76 100644
+--- a/include/linux/memfd.h
++++ b/include/linux/memfd.h
+@@ -8,6 +8,9 @@
+ 
+ #ifdef CONFIG_MEMFD_CREATE
+ extern long memfd_fcntl(struct file *file, unsigned int cmd, unsigned int arg);
++#ifdef CONFIG_MEMFD_ASHMEM_SHIM
++struct file *memfd_ashmem_shim(struct file *file);
++#endif
+ struct folio *memfd_alloc_folio(struct file *memfd, pgoff_t idx);
+ /*
+  * Check for any existing seals on mmap, return an error if access is denied due
+diff --git a/mm/Kconfig b/mm/Kconfig
+index 604c58199..595964337 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -1341,6 +1341,13 @@ config KMAP_LOCAL_NON_LINEAR_PTE_ARRAY
+ config MEMFD_CREATE
+ 	bool "Enable memfd_create() system call" if EXPERT
+ 
++config MEMFD_ASHMEM_SHIM
++	bool "ashmem ioctls on memfd files (Android compatibility)"
++	depends on MEMFD_CREATE && SHMEM && !DEBUG_VM
++	help
++	  Answer the old Android ashmem ioctls on memfd files, so Android's
++	  libcutils uses memfd for shared memory instead of /dev/ashmem.
++
+ config SECRETMEM
+ 	default y
+ 	bool "Enable memfd_secret() system call" if EXPERT
+diff --git a/mm/Makefile b/mm/Makefile
+index e7245cb88..1aef2124e 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -139,6 +139,7 @@ obj-$(CONFIG_PERCPU_STATS) += percpu-stats.o
+ obj-$(CONFIG_ZONE_DEVICE) += memremap.o
+ obj-$(CONFIG_HMM_MIRROR) += hmm.o
+ obj-$(CONFIG_MEMFD_CREATE) += memfd.o
++obj-$(CONFIG_MEMFD_ASHMEM_SHIM) += memfd-ashmem-shim.o
+ obj-$(CONFIG_MAPPING_DIRTY_HELPERS) += mapping_dirty_helpers.o
+ obj-$(CONFIG_PTDUMP) += ptdump.o
+ obj-$(CONFIG_PAGE_REPORTING) += page_reporting.o
+diff --git a/mm/memfd-ashmem-shim.c b/mm/memfd-ashmem-shim.c
+new file mode 100644
+index 000000000..3c7ece295
+--- /dev/null
++++ b/mm/memfd-ashmem-shim.c
+@@ -0,0 +1,144 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ashmem ioctl compatibility for memfd files.
++ *
++ * Android's libcutils only uses memfd for shared memory when the kernel
++ * answers the old ashmem ioctls on memfds (vendor code still issues them);
++ * otherwise it falls back to /dev/ashmem, which mainline no longer has.
++ * This gives memfds (shmem backed, not hugetlb) the ioctls that make sense
++ * for them: size, name, protection mask (mapped onto write seals), and
++ * pinning as a no-op (memfd memory is never purged).
++ *
++ * Note: the memfd gets a copy of shmem's file_operations, so the
++ * VM_BUG_ON(f_op != &shmem_file_operations) in shmem_get_unmapped_area()
++ * would fire with CONFIG_DEBUG_VM; do not enable both.
++ */
++#include <linux/fs.h>
++#include <linux/memfd.h>
++#include <linux/mman.h>
++#include <linux/mutex.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++#include <linux/compat.h>
++#include <uapi/linux/fcntl.h>
++
++#define ASHMEM_NAME_LEN		256
++#define ASHMEM_NAME_PREFIX	"memfd:"
++#define ASHMEM_NOT_PURGED	0
++#define ASHMEM_IS_PINNED	1
++
++#define __ASHMEMIOC		0x77
++#define ASHMEM_SET_NAME		_IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])
++#define ASHMEM_GET_NAME		_IOR(__ASHMEMIOC, 2, char[ASHMEM_NAME_LEN])
++#define ASHMEM_SET_SIZE		_IOW(__ASHMEMIOC, 3, size_t)
++#define ASHMEM_GET_SIZE		_IO(__ASHMEMIOC, 4)
++#define ASHMEM_SET_PROT_MASK	_IOW(__ASHMEMIOC, 5, unsigned long)
++#define ASHMEM_GET_PROT_MASK	_IO(__ASHMEMIOC, 6)
++#define ASHMEM_PIN		_IOW(__ASHMEMIOC, 7, struct ashmem_pin)
++#define ASHMEM_UNPIN		_IOW(__ASHMEMIOC, 8, struct ashmem_pin)
++#define ASHMEM_GET_PIN_STATUS	_IO(__ASHMEMIOC, 9)
++#define ASHMEM_PURGE_ALL_CACHES	_IO(__ASHMEMIOC, 10)
++#define ASHMEM_GET_FILE_ID	_IOR(__ASHMEMIOC, 11, unsigned long)
++
++struct ashmem_pin {
++	__u32 offset;
++	__u32 len;
++};
++
++static long memfd_ashmem_ioctl(struct file *file, unsigned int cmd,
++			       unsigned long arg)
++{
++	struct inode *inode = file_inode(file);
++	int seals;
++
++	switch (cmd) {
++	case ASHMEM_GET_SIZE:
++		return i_size_read(inode);
++	case ASHMEM_SET_SIZE:
++		/* sized with ftruncate() for memfds; accept a no-op resize */
++		return arg == i_size_read(inode) ? 0 : -EINVAL;
++	case ASHMEM_GET_PROT_MASK:
++		seals = memfd_get_seals(file);
++		if (seals < 0)
++			return seals;
++		if (seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE))
++			return PROT_READ | PROT_EXEC;
++		return PROT_READ | PROT_WRITE | PROT_EXEC;
++	case ASHMEM_SET_PROT_MASK:
++		if (arg & PROT_WRITE)
++			return 0;
++		return memfd_add_seals(file, F_SEAL_FUTURE_WRITE);
++	case ASHMEM_GET_NAME: {
++		char name[ASHMEM_NAME_LEN] = { 0 };
++		const char *dname = file->f_path.dentry->d_name.name;
++
++		if (str_has_prefix(dname, ASHMEM_NAME_PREFIX))
++			dname += strlen(ASHMEM_NAME_PREFIX);
++		strscpy(name, dname, sizeof(name));
++		if (copy_to_user((void __user *)arg, name, strlen(name) + 1))
++			return -EFAULT;
++		return 0;
++	}
++	case ASHMEM_SET_NAME:
++		/* the name is given at memfd_create() time */
++		return 0;
++	case ASHMEM_PIN:
++		return ASHMEM_NOT_PURGED;
++	case ASHMEM_UNPIN:
++		return 0;
++	case ASHMEM_GET_PIN_STATUS:
++		return ASHMEM_IS_PINNED;
++	case ASHMEM_PURGE_ALL_CACHES:
++		return 0;
++	case ASHMEM_GET_FILE_ID: {
++		unsigned long ino = inode->i_ino;
++
++		if (copy_to_user((void __user *)arg, &ino, sizeof(ino)))
++			return -EFAULT;
++		return 0;
++	}
++	}
++	return -ENOTTY;
++}
++
++#ifdef CONFIG_COMPAT
++static long memfd_ashmem_compat_ioctl(struct file *file, unsigned int cmd,
++				      unsigned long arg)
++{
++	/* the 32-bit size_t/unsigned long variants differ only in size bits */
++	switch (cmd) {
++	case _IOW(__ASHMEMIOC, 3, compat_size_t):
++		cmd = ASHMEM_SET_SIZE;
++		break;
++	case _IOW(__ASHMEMIOC, 5, compat_ulong_t):
++		cmd = ASHMEM_SET_PROT_MASK;
++		break;
++	case _IOR(__ASHMEMIOC, 11, compat_ulong_t):
++		return -ENOTTY;
++	}
++	return memfd_ashmem_ioctl(file, cmd, (unsigned long)compat_ptr(arg));
++}
++#endif
++
++static struct file_operations memfd_ashmem_fops;
++static const struct file_operations *memfd_ashmem_base;
++static DEFINE_MUTEX(memfd_ashmem_lock);
++
++struct file *memfd_ashmem_shim(struct file *file)
++{
++	mutex_lock(&memfd_ashmem_lock);
++	if (!memfd_ashmem_base) {
++		memfd_ashmem_fops = *file->f_op;
++		memfd_ashmem_fops.unlocked_ioctl = memfd_ashmem_ioctl;
++#ifdef CONFIG_COMPAT
++		memfd_ashmem_fops.compat_ioctl = memfd_ashmem_compat_ioctl;
++#endif
++		memfd_ashmem_base = file->f_op;
++	}
++	mutex_unlock(&memfd_ashmem_lock);
++
++	/* only ever wrap the shmem fops the copy was made from */
++	if (file->f_op == memfd_ashmem_base)
++		file->f_op = &memfd_ashmem_fops;
++	return file;
++}
+diff --git a/mm/memfd.c b/mm/memfd.c
+index c708d9253..8fb97ef82 100644
+--- a/mm/memfd.c
++++ b/mm/memfd.c
+@@ -467,6 +467,10 @@ struct file *memfd_alloc_file(const char *name, unsigned int flags)
+ 					MFD_HUGE_MASK);
+ 	} else {
+ 		file = shmem_file_setup(name, 0, mk_vma_flags(VMA_NORESERVE_BIT));
++#ifdef CONFIG_MEMFD_ASHMEM_SHIM
++		if (!IS_ERR(file))
++			file = memfd_ashmem_shim(file);
++#endif
+ 	}
+ 	if (IS_ERR(file))
+ 		return file;

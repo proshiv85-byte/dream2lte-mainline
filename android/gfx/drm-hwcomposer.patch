@@ -1,0 +1,58 @@
+diff --git a/hwc2_device/hwc2_device.cpp b/hwc2_device/hwc2_device.cpp
+index 2f8b753..79e933c 100644
+--- a/hwc2_device/hwc2_device.cpp
++++ b/hwc2_device/hwc2_device.cpp
+@@ -19,6 +19,7 @@
+ 
+ #define LOG_TAG "drmhwc"
+ 
++#include <algorithm>
+ #include <cassert>
+ #include <cinttypes>
+ #include <memory>
+@@ -485,11 +486,17 @@ static int32_t GetColorModes(hwc2_device_t *device, hwc2_display_t display,
+   if (modes.empty())
+     return static_cast<int32_t>(HWC2::Error::BadConfig);
+ 
+-  for (uint32_t i = 0; i < modes.size(); ++i) {
++  // HWC2 two-call protocol: out_modes == nullptr asks for the count only
++  if (out_modes == nullptr) {
++    *num_modes = modes.size();
++    return 0;
++  }
++  const uint32_t n = std::min<uint32_t>(*num_modes, modes.size());
++  for (uint32_t i = 0; i < n; ++i) {
+     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic):
+     out_modes[i] = static_cast<int32_t>(modes[i]);
+   }
+-  *num_modes = modes.size();
++  *num_modes = n;
+   return 0;
+ }
+ 
+@@ -746,6 +753,12 @@ static int32_t GetReleaseFences(hwc2_device_t *device, hwc2_display_t display,
+ 
+   auto hwc2display = GetHwc2DeviceDisplay(*idisplay);
+ 
++  // HWC2 two-call protocol: null arrays ask for the count only
++  if (out_layers == nullptr) {
++    *out_num_elements = hwc2display->release_fences.size();
++    return static_cast<int32_t>(HWC2::Error::None);
++  }
++
+   if (*out_num_elements < hwc2display->release_fences.size()) {
+     ALOGW("Overflow num_elements %d/%zu", *out_num_elements,
+           hwc2display->release_fences.size());
+@@ -830,6 +843,12 @@ static int32_t GetChangedCompositionTypes(hwc2_device_t *device,
+ 
+   auto hwc2display = GetHwc2DeviceDisplay(*idisplay);
+ 
++  // HWC2 two-call protocol: null arrays ask for the count only
++  if (out_layers == nullptr) {
++    *out_num_elements = hwc2display->changed_layers.size();
++    return static_cast<int32_t>(HWC2::Error::None);
++  }
++
+   if (*out_num_elements < hwc2display->changed_layers.size()) {
+     ALOGW("Overflow num_elements %d/%zu", *out_num_elements,
+           hwc2display->changed_layers.size());

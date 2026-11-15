@@ -26,17 +26,18 @@ It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
 | Touchscreen (STM FTS8) | works |
 | Buttons | works |
 | UFS storage | works (HS-G3, 2 lanes), verified reads/writes |
-| USB device mode | works, high-speed (RNDIS/NCM/... via configfs) |
+| USB device mode | works, high-speed (RNDIS/NCM/... via configfs). SuperSpeed (USB 3) support is in the PHY driver but untested: no USB 3 cable at hand yet |
 | Battery fuel gauge | works (MAX77865 FG, `max17042` driver) |
 | Charging | works: computer port 500 mA, charging port (CDP) 1.5 A, wall charger 2.1 A, Quick Charge 2.0 chargers at 9 V (1.65 A in, 2.5 A to the battery), slower or stopped when the battery is too cold or too hot. USB PD (up to 15 W) and Type-C 1.5 / 3 A are in but untested; no Samsung AFC yet |
-| RTC | works (S2MPS17, through the APM firmware) |
+| RTC | works (S2MPS17, through the APM firmware), with a wake-up alarm (`rtcwake`, `/sys/class/rtc/rtc0/wakealarm`) |
 | Reboot, reboot to recovery | works; hardware watchdog available |
 | Power off | works. Plugging a charger into the powered-off phone starts off-mode charging (battery screen, hold power to boot, unplug to power off), see Booting |
 | Video decoding (MFC) | works: H.264, HEVC, VP8, VP9 through V4L2 (the older codecs it lists are untested), e.g. FFmpeg's `h264_v4l2m2m`; in Firefox for H.264/HEVC with the patched libavcodec below (1080p at ~4% CPU); VP9 in Firefox still in software |
 | Bluetooth | works (BCM4361 over UART1, BlueZ): pairing, A2DP headphones through PulseAudio. Needs the vendor patch file, see Rootfs notes |
 | USB host (OTG) | works through the USB-C controller (S2MM005) with 5 V from the charger (up to 1.5 A). Devices without the CC resistor (cheap USB-C gadgets) aren't detected, also not by the Samsung kernel: `echo source > /sys/class/typec/port0/port_type` forces host mode, `dual` goes back (do that before plugging in a PC or charger) |
 | Audio | headphone jack playback works (ABOX with the vendor Calliope firmware, CS47L93 codec), 48 kHz; needs the firmware, see Rootfs notes. loudspeaker works too (MAX98506 on UAIF4, [notes](notes/loudspeaker.md)); earpiece, mics and jack detection not yet. USB audio devices work |
-| Cameras, modem, USB 3, suspend | not supported yet |
+| Suspend | suspend-to-idle (s2idle, `echo mem > /sys/power/state`): devices and the screen are off, the CPUs idle until the power key or the RTC alarm wakes the phone. No deep sleep yet (the SoC stays powered) |
+| Cameras, modem | not supported yet |
 
 ## What's in the patches
 

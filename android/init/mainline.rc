@@ -1,0 +1,29 @@
+# ---- mainline test boot (androidboot.init_rc): same script dirs init loads by default ----
+import /system/etc/init
+import /system_ext/etc/init
+import /vendor/etc/init
+import /odm/etc/init
+import /product/etc/init
+
+# throwaway /data in RAM; the real USERDATA is never touched
+on late-fs
+    mount tmpfs tmpfs /data nosuid nodev noatime mode=0771,uid=1000,gid=1000
+    restorecon /data
+
+# mainline graphics (Mesa panfrost EGL, minigbm gralloc, drm_hwcomposer) from /metadata, over /vendor/lib64
+on early-init
+    mount overlay overlay /vendor/lib64 ro lowerdir=/metadata/mainline/vendor/lib64:/vendor/lib64
+    # drm_hwcomposer: the exynos-drm card (simpledrm stays registered too)
+    setprop vendor.hwc.drm.device /dev/dri/card0
+    # shared memory through memfd (the kernel answers ashmem ioctls on memfds)
+    setprop sys.use_memfd true
+    # system suspend panics on this kernel (unsupported yet): keep a wakelock held
+    write /sys/power/wake_lock mainline_nosuspend
+
+# reboot without root: adb shell setprop debug.mainline.reboot recovery|normal|bootloader
+on property:debug.mainline.reboot=recovery
+    setprop sys.powerctl reboot,recovery
+on property:debug.mainline.reboot=normal
+    setprop sys.powerctl reboot
+on property:debug.mainline.reboot=bootloader
+    setprop sys.powerctl reboot,bootloader

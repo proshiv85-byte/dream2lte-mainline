@@ -1,0 +1,99 @@
+From ea3472f60a94f5f03c6d38e442e808ef032635aa Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sun, 15 Nov 2026 10:47:51 +0200
+Subject: [PATCH 49/51] WIP: arm64: dts: exynos8895: USB 3, USB reference
+ clock, RTC alarm
+
+- DWC3 glue: the PHY reference clock, the link needs it
+- dream2lte: maximum-speed super-speed, the plug orientation GPIO (gpi1-7)
+  for the USB PHY
+- dream2lte: the PMIC interrupt (gpa3-6) for the RTC alarm, as wakeup
+  source
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ .../boot/dts/exynos/exynos8895-dream2lte.dts  | 26 ++++++++++++++++++-
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    |  5 ++--
+ 2 files changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+index dca214cf5..adbbcb87e 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte.dts
+@@ -406,6 +406,12 @@ sd2_cd: sd2-cd-pins {
+ 		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV4>;
+ 	};
+ 
++	pmic_irq: pmic-irq-pins {
++		samsung,pins = "gpa3-6";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++	};
++
+ 	usbpd_irq: usbpd-irq-pins {
+ 		samsung,pins = "gpa1-7";
+ 		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+@@ -608,7 +614,7 @@ &usbdrd {
+ 
+ &usbdrd_dwc3 {
+ 	dr_mode = "otg";
+-	maximum-speed = "high-speed";
++	maximum-speed = "super-speed";
+ 	usb-role-switch;
+ 	role-switch-default-mode = "peripheral";
+ 
+@@ -620,6 +626,11 @@ dwc3_hs: endpoint {
+ };
+ 
+ &usbdrd_phy {
++	/* plug orientation from the Type-C controller (low: flipped) */
++	orientation-gpios = <&gpi1 7 GPIO_ACTIVE_LOW>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&usb_orientation>;
++
+ 	status = "okay";
+ };
+ 
+@@ -669,6 +680,11 @@ tsp_avdd: LDO35 {
+ 	rtc@2 {
+ 		compatible = "samsung,s2mps17-rtc";
+ 		reg = <0x2>;
++		/* the PMIC interrupt line; only the RTC alarm is unmasked */
++		interrupts-extended = <&gpa3 6 IRQ_TYPE_LEVEL_LOW>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&pmic_irq>;
++		wakeup-source;
+ 	};
+ };
+ 
+@@ -709,6 +725,14 @@ reboot-mode {
+ 	};
+ };
+ 
++&pinctrl_fsys0 {
++	usb_orientation: usb-orientation-pins {
++		samsung,pins = "gpi1-7";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++	};
++};
++
+ &pinctrl_fsys1 {
+ 	pcie0_clkreq: pcie0-clkreq-pins {
+ 		samsung,pins = "gpj1-0";
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index 3c650e9a3..d066c7269 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -1692,8 +1692,9 @@ usbdrd: usb@10c00000 {
+ 			compatible = "samsung,exynos8895-dwusb3";
+ 			ranges = <0x0 0x10c00000 0x10000>;
+ 			clocks = <&cmu_fsys0 CLK_GOUT_FSYS0_USBTV_I_USB30DRD_ACLK>,
+-				 <&cmu_fsys0 CLK_GOUT_FSYS0_USBTV_I_USB30DRD_SUSPEND_CLK>;
+-			clock-names = "aclk", "susp_clk";
++				 <&cmu_fsys0 CLK_GOUT_FSYS0_USBTV_I_USB30DRD_SUSPEND_CLK>,
++				 <&cmu_fsys0 CLK_GOUT_FSYS0_USBTV_I_USB30DRD_REF_CLK>;
++			clock-names = "aclk", "susp_clk", "ref";
+ 			#address-cells = <1>;
+ 			#size-cells = <1>;
+ 

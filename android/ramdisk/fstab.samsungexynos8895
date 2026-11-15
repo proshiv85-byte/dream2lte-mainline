@@ -1,0 +1,6 @@
+# mainline test boot: first stage only, by-name links (boot_devices=11120000.ufshc).
+# USERDATA/CACHE/MISC deliberately absent; EFS read-only.
+/dev/block/by-name/SYSTEM    /system    ext4  ro,errors=panic,noload                 wait,first_stage_mount
+/dev/block/by-name/HIDDEN    /metadata  ext4  noatime,nosuid,nodev,discard           wait,first_stage_mount
+/dev/block/by-name/VENDOR    /vendor    ext4  ro,errors=panic,noload                 wait,first_stage_mount
+/dev/block/by-name/EFS       /efs       ext4  ro,noload,noatime,nosuid,nodev         wait,first_stage_mount

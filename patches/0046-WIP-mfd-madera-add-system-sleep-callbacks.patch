@@ -1,0 +1,38 @@
+From 487948394a22f8559ac3b27e381387d0b7baa6ff Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Sun, 15 Nov 2026 10:47:51 +0200
+Subject: [PATCH 46/51] WIP: mfd: madera: add system sleep callbacks
+
+With runtime PM callbacks only, the PM core sees the device as having no
+PM callbacks and enables smart suspend for it (the SPI controller ignores
+its children). As madera-irq, a child with system sleep callbacks, must
+resume, the core then marks the runtime-suspended device active on
+resume without calling madera_runtime_resume(), and the next autosuspend
+turned DCVDD off a second time ("unbalanced disables" on every resume
+on a CS47L93). Force runtime suspend/resume across system sleep.
+
+Assisted-by: Claude Opus 5.5 (Anthropic)
+---
+ drivers/mfd/madera-core.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/drivers/mfd/madera-core.c b/drivers/mfd/madera-core.c
+index 2f74a8c64..8d328dab6 100644
+--- a/drivers/mfd/madera-core.c
++++ b/drivers/mfd/madera-core.c
+@@ -364,7 +364,15 @@ static int __maybe_unused madera_runtime_suspend(struct device *dev)
+ 	return 0;
+ }
+ 
++/*
++ * Without system sleep callbacks the PM core would treat the device as
++ * having none at all and, on resume, mark it runtime-active without
++ * calling madera_runtime_resume(): the next autosuspend would then turn
++ * DCVDD off a second time.
++ */
+ const struct dev_pm_ops madera_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
++				pm_runtime_force_resume)
+ 	SET_RUNTIME_PM_OPS(madera_runtime_suspend,
+ 			   madera_runtime_resume,
+ 			   NULL)

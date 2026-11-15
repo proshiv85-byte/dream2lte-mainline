@@ -1,5 +1,6 @@
 /linux/
 /build/
+/build-android/
 /out/
 /backup/
 *.log

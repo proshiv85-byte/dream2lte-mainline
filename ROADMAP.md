@@ -15,7 +15,7 @@ already works.
 | 4 | **Notification LED** | Small, easy win. | S | Check the vendor DT for which chip drives it. |
 | 5 | ~~Bluetooth (BCM4361)~~ | **Done.** `hci_bcm` on UART1 with the vendor `.hcd` patch, real address from EFS; A2DP headphones work. | — | Follow-ups: a waybar/GUI for pairing, runtime PM through the wake GPIOs. |
 | 6 | ~~Power off~~ | **Done.** `poweroff` works; a charger plugged into the powered-off phone starts off-mode charging (battery screen, hold power to boot). | — | Follow-up: put the panel to sleep in off-mode charging instead of showing black (needs exynosdrm in the initramfs). |
-| 7 | **Suspend (s2idle, then deep sleep)** | The big one for battery life. | L–XL | Needs the screen off (#1), power domains (#9), wakeup sources (power key, RTC, USB), and the APM firmware's sleep path. s2idle first, it doesn't need the firmware. |
+| 7 | **Suspend**: ~~s2idle~~, deep sleep | The big one for battery life. | L–XL | **s2idle works** (power key and RTC alarm wake it; USB, UFS, display, charger survive; 20+ cycles tested). Deep sleep (SoC SLEEP through the APM, vendor `exynos-pm` / pwrcal: PMU system power tables, wakeup masks, pad retention, PSCI index 133) is next; also waking on a charger/USB plug (MUIC/S2MM005 interrupts as wakeup sources). |
 
 ## Speed and power
 
@@ -30,7 +30,7 @@ already works.
 
 | # | Item | Why it matters | Effort | Notes |
 |---|---|---|---|---|
-| 12 | ~~USB host / OTG~~, USB 3 | **Host mode done** (S2MM005 Type-C driver, VBUS from the charger). | M–L | Follow-ups: test with a compliant device (OTG adapter); USB 3 needs the SuperSpeed PHY. |
+| 12 | ~~USB host / OTG~~, USB 3 | **Host mode done** (S2MM005 Type-C driver, VBUS from the charger). | M–L | USB 3: the PHY now sets up the SuperSpeed part (vendor tuning, CR-port writes) and picks the port for the plug orientation from gpi1-7 as the vendor does; **untested at 5 Gbps** (only USB 2 cables so far). gpi1-7 didn't change when the plug was flipped with a USB 2 cable: check with a USB 3 cable, both ways round. |
 | 13 | **Audio** | Speaker, earpiece, mics. | L | **Headphone and loudspeaker playback work** (ABOX + Calliope firmware, CS47L93 with FLL1 from MCLK1 = XCLKOUT 26 MHz). Loudspeaker: MAX98506 on UAIF4, pins gph3-0..3 (the vendor DT names the wrong ones), picked with the `Output` control: see [notes/loudspeaker.md](notes/loudspeaker.md). Next: earpiece (HPOUT3), mics and capture (WDMA), jack detection (needs the 32 kHz MCLK2), the ABOX ASRC for 44.1 kHz. |
 | 14 | **Sensors** (accelerometer, gyro, light, proximity) | Auto-rotate, auto-brightness. | L–XL | They sit behind a sensor hub MCU with Samsung's own protocol. |
 | 15 | **NFC** | Low value on Linux. | M | Samsung S3NRN82; mainline `s3fwrn5` might cover it. |
@@ -40,6 +40,7 @@ already works.
 
 - **"CPU1 failed to come online"**: seen once in about 16 boots; not reproduced since.
 - **WiFi**: hotspot / P2P and power saving not tried. Wi-Fi 7 routers crashed the firmware on association (its BSS max idle support); patch 0033 turns that off.
+- **Suspend**: once in 20 resumes, the first fuel gauge / battery thermistor read timed out (-110); "Power domain abox disable failed" on every suspend (harmless so far).
 - **Display**: no plane blend-mode property; full power-up from off is missing, which suspend will need.
 
 ## Housekeeping
@@ -50,5 +51,4 @@ already works.
 
 ## Suggested order
 
-7 next: brightness/screen-off, the charger, Bluetooth and power off are done,
-and suspend is the biggest battery win.
+s2idle works; deep sleep (7) is the biggest battery win left.
