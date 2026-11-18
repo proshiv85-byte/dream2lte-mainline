@@ -10,7 +10,7 @@ made for the [ARMtix (Artix Linux) port](https://github.com/proshiv85-byte/armti
 
 The kernel is current mainline (7.3 and the start of the 7.4 merge window, the
 commit in [`patches/BASE`](patches/BASE)) plus the patches in [`patches/`](patches/).
-It boots the ARMtix root filesystem from the internal UFS (`sda27`, USERDATA).
+It boots the ARMtix root filesystem from the internal UFS (the USERDATA partition, `sda27` on most units, `sda28` on some).
 
 ## Status
 
@@ -165,7 +165,7 @@ payload, which the Image is copied or unpacked over; without it, lld puts
 `.rodata` after the payload.
 
 Otherwise the DTB passed by S-Boot is ignored, the kernel command line is
-built in. A small initramfs mounts `/dev/sda27` and switches to `/sbin/init`.
+built in. A small initramfs mounts the USERDATA partition (found by its GPT name) and switches to `/sbin/init`.
 
 **Off-mode charging:** plugging a charger into the powered-off phone powers
 it on with the boot mode `charger`. The initramfs then runs

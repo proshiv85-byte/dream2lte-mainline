@@ -2,7 +2,7 @@
 # ARMtix (Artix Linux aarch64) installer for Samsung Galaxy S8+ Exynos
 # (SM-G955F, dream2lte), mainline kernel. Run from TWRP: Install -> this zip.
 #
-#  - FORMATS USERDATA (internal storage, sda27) as ext4 and installs the
+#  - FORMATS USERDATA (internal storage) as ext4 and installs the
 #    ARMtix root filesystem there, plus the mainline kernel modules. The SD
 #    card is not touched.
 #  - Copies the Samsung firmware (WiFi, Bluetooth, audio, video decoder) from
@@ -62,7 +62,8 @@ DATA=$(readlink -f /dev/block/by-name/USERDATA)
 VENDOR=$(readlink -f /dev/block/by-name/VENDOR)
 EFS=$(readlink -f /dev/block/by-name/EFS)
 [ -b "$BOOT" ] || abort "BOOT partition not found"
-[ "$DATA" = /dev/block/sda27 ] || abort "USERDATA is '$DATA', the kernel expects /dev/block/sda27"
+[ -b "$DATA" ] || abort "USERDATA partition not found"
+ui "USERDATA: $DATA"
 
 ui "Verifying zip contents ..."
 sumof() { $BB unzip -p "$ZIP" "armtix/$1" | $BB sha256sum | cut -d' ' -f1; }
